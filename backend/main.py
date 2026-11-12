@@ -4,11 +4,12 @@ from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 load_dotenv(Path(__file__).with_name(".env"))
 
 from .core.stt_stream import stream_audio_to_stt
-from .core.tts_engine import stream_tts
+from .core.tts_engine import stream_tts, synthesize_audio
 from .database.ledger_ops import apply_ledger_event, get_customer_balance, get_ledger_summary, initialize_database
 from .nlu.gemini_parser import parse_transcript
 
@@ -67,7 +68,11 @@ async def tts(payload: dict):
     text = payload.get("text")
     if not isinstance(text, str) or not text.strip():
         raise HTTPException(status_code=422, detail="text must be a non-empty string")
-    return {"text": text, "audio_available": False, "message": "TTS provider is not configured yet"}
+    try:
+        audio = await synthesize_audio(text.strip())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return Response(content=audio, media_type="audio/wav", headers={"Content-Disposition": "inline; filename=voice-khata.wav"})
 
 
 @app.get("/ledger/events")
@@ -81,8 +86,11 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
         async for transcript, confidence in stream_audio_to_stt(websocket):
-            await websocket.send_json({"type": "transcript", "text": transcript, "confidence": confidence})
-            if confidence < 0.80:
+            await websocket.send_json({
+                "type": "transcript", "text": transcript, "confidence": confidence,
+                "confidence_source": "client" if confidence is not None else "not-provided-by-prisma",
+            })
+            if confidence is not None and confidence < 0.80:
                 await stream_tts(websocket, "Kripya dobara bole.")
                 continue
             events = parse_transcript(transcript)
