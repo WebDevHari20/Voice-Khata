@@ -73,19 +73,8 @@ async def stream_audio_to_stt(websocket):
                         language_code = payload.get("language_code", language_code)
                         if sample_rate not in {8000, 16000, 44100, 48000}:
                             await websocket.send_json({"type": "error", "detail": "sample_rate must be 8000, 16000, 44100, or 48000"})
-                        elif key and provider is None:
-                            try:
-                                provider = await _connect_prisma(key, sample_rate, language_code)
-                                provider_read = asyncio.create_task(provider.recv())
-                                await websocket.send_json({"type": "stt_status", "provider": "prisma", "status": "connected"})
-                            except Exception as exc:
-                                provider = provider_read = None
-                                await websocket.send_json({
-                                    "type": "provider_unavailable",
-                                    "detail": f"Prisma connection failed: {exc}",
-                                    "provider": "prisma",
-                                    "hint": "Check GNANI_API_KEY. Browser speech recognition is active as fallback.",
-                                })
+                        else:
+                            await websocket.send_json({"type": "configured", "status": "ok"})
                     else:
                         await websocket.send_json({"type": "error", "detail": "send transcript text, a configure frame, or raw PCM audio"})
                 elif message.get("bytes") is not None:

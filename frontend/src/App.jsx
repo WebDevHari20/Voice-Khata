@@ -80,7 +80,7 @@ function App() {
   const [typedText, setTypedText] = useState('')
   const [error, setError] = useState('')
   const [refreshing, setRefreshing] = useState(false)
-  const [useBrowserSpeech, setUseBrowserSpeech] = useState(false)
+  const [useBrowserSpeech, setUseBrowserSpeech] = useState(Boolean(BrowserSpeechRecognition))
 
   const socketRef = useRef(null)
   const captureRef = useRef(null)
