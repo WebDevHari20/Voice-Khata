@@ -265,7 +265,8 @@ function App() {
     }
     socket.onerror = () => {
       setSocketStatus('error')
-      reject(new Error('Could not open voice connection'))
+      setError('Backend speech API is disconnected or unreachable. Please check backend status.')
+      reject(new Error('Backend speech API is disconnected or unreachable.'))
     }
     socket.onclose = () => {
       setSocketStatus('disconnected')
