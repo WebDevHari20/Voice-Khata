@@ -1,13 +1,27 @@
 import re
 
 PHRASES = {
-    "teen sau chaalis": "340", "dhai sau": "250", "sawa sau": "125",
-    "paune sau": "75", "paune do sau": "175", "paune teen sau": "275",
-    "paune char sau": "375", "paune chaar sau": "375", "derh sau": "150",
-    "dedh sau": "150", "dhai hazar": "2500", "dhai hazaar": "2500",
-    "derh hazar": "1500", "derh hazaar": "1500", "dedh hazar": "1500",
-    "dedh hazaar": "1500", "sawa hazar": "1250", "sawa hazaar": "1250",
-    "sava sau": "125", "sava hazar": "1250", "sava hazaar": "1250",
+    # 150 phonetic variants
+    "deid sou": "150", "deid sau": "150", "deid so": "150",
+    "dedh sou": "150", "dedh sau": "150", "dedh so": "150",
+    "derh sou": "150", "derh sau": "150", "derh so": "150",
+    "daid sou": "150", "daid sau": "150", "deed sou": "150", "deed sau": "150",
+    # 250 phonetic variants
+    "dhai sou": "250", "dhai sau": "250", "dhai so": "250",
+    "dhaai sou": "250", "dhaai sau": "250", "dhaai so": "250",
+    "dayi sou": "250", "dayi sau": "250",
+    # 125 & 75 phonetic variants
+    "sawa sou": "125", "sawa sau": "125", "sava sou": "125", "sava sau": "125",
+    "paune sou": "75", "paune sau": "75",
+    "paune do sau": "175", "paune teen sau": "275", "paune char sau": "375", "paune chaar sau": "375",
+    # 1500 & 2500 phonetic variants
+    "deid hazar": "1500", "deid hazaar": "1500", "dedh hazar": "1500", "dedh hazaar": "1500",
+    "derh hazar": "1500", "derh hazaar": "1500",
+    "dhai hazar": "2500", "dhai hazaar": "2500", "dhaai hazar": "2500", "dhaai hazaar": "2500",
+    "sawa hazar": "1250", "sawa hazaar": "1250", "sava hazar": "1250", "sava hazaar": "1250",
+    "teen sau chaalis": "340",
+    # English single words
+    "hundred": "100", "thousand": "1000",
 }
 
 ONES = {
@@ -100,11 +114,25 @@ DEV_NUMBER_WORDS = {
     "इक्यासी": 81, "बयासी": 82, "तिरासी": 83, "चौरासी": 84, "पचासी": 85, "छियासी": 86, "सत्तासी": 87, "अट्ठासी": 88, "नवासी": 89, "नब्बे": 90,
     "इक्यानवे": 91, "बानवे": 92, "तिरानवे": 93, "चौरानवे": 94, "पंचानवे": 95, "छियानवे": 96, "सत्तानवे": 97, "अट्ठानवे": 98, "निन्यानवे": 99,
     "सौ": 100, "हज़ार": 1000, "हजार": 1000, "लाख": 100000, "करोड़": 10000000,
-    "डेढ़": 150, "ढाई": 250, "सवा": 125, "पौने": 75,
+}
+
+DEV_PHRASES = {
+    "डेढ़ सौ": "150", "डेढ सौ": "150", "देढ़ सौ": "150",
+    "ढाई सौ": "250", "सवा सौ": "125", "पौने सौ": "75",
+    "डेढ़ हजार": "1500", "डेढ़ हज़ार": "1500",
+    "ढाई हजार": "2500", "ढाई हज़ार": "2500",
+    "सवा हजार": "1250", "सवा हज़ार": "1250",
+    "हंड्रेड": "100", "हंड्रड": "100", "हन्ड्रेड": "100",
+    "थाउजेंड": "1000", "थाउज़ेंड": "1000",
+    "वन": "1", "टू": "2", "थ्री": "3", "फोर": "4", "फाइव": "5",
+    "सिक्स": "6", "सेवन": "7", "एट": "8", "नाइन": "9", "टेन": "10",
+    "ट्वेंटी": "20", "थर्टी": "30", "फिफ्टी": "50",
 }
 
 def _normalize_devanagari_words(text: str) -> str:
     text = text.translate(DEV_DIGITS)
+    for phrase, val in sorted(DEV_PHRASES.items(), key=lambda p: -len(p[0])):
+        text = text.replace(phrase, val)
     tokens = text.split()
     output = []
     i = 0

@@ -24,7 +24,7 @@ try:
         apply_ledger_event, get_customer_balance, get_ledger_summary,
         get_all_events, get_daily_credit_total, get_reminder_consent, initialize_database,
         prepare_latest_correction, prepare_reminder, resolve_customer_name,
-        set_reminder_consent,
+        set_reminder_consent, get_last_active_customer, get_customer_net_due,
     )
     from .nlu.gemini_parser import extract_customer_name, parse_transcript
     from .nlu.normalizer import normalize_hindi_numbers
@@ -36,21 +36,29 @@ except (ImportError, ValueError):
         apply_ledger_event, get_customer_balance, get_ledger_summary,
         get_all_events, get_daily_credit_total, get_reminder_consent, initialize_database,
         prepare_latest_correction, prepare_reminder, resolve_customer_name,
-        set_reminder_consent,
+        set_reminder_consent, get_last_active_customer, get_customer_net_due,
     )
     from nlu.gemini_parser import extract_customer_name, parse_transcript
     from nlu.normalizer import normalize_hindi_numbers
 
 
-YES_WORDS = {"haan", "han", "ha", "yes", "yep", "correct", "sahi", "theek", "thik", "bilkul", "confirm", "save", "kar", "karo", "ji", "jee", "hai"}
-NO_WORDS = {"nahi", "nahin", "nahiin", "no", "nope", "not", "wrong", "galat", "cancel", "mat"}
+YES_WORDS = {
+    "haan", "han", "ha", "yes", "yep", "yeah", "correct", "sahi", "theek", "thik",
+    "bilkul", "confirm", "save", "kar", "karo", "ji", "jee", "hai", "sure", "ok", "okay",
+    "हाँ", "हां", "सही", "ठीक", "बिल्कुल", "कन्फर्म", "करो", "जी", "सेव", "हाँजी"
+}
+NO_WORDS = {
+    "nahi", "nahin", "nahiin", "no", "nope", "not", "wrong", "galat", "cancel", "mat", "rok",
+    "नहीं", "नही", "गलत", "कैंसिल", "मत", "रोको", "ना"
+}
 
 
 def _confirmation_intent(text):
-    words = re.findall(r"[a-z]+", text.lower())
-    if words and words[0] in NO_WORDS:
+    low = text.lower().strip()
+    words = [t.strip("।,!?") for t in low.split()]
+    if words and any(w in NO_WORDS for w in words):
         return "no"
-    if words and not re.search(r"\d", normalize_hindi_numbers(text)) and all(word in YES_WORDS for word in words):
+    if words and not re.search(r"\d", normalize_hindi_numbers(text)) and any(w in YES_WORDS for w in words):
         return "yes"
     return None
 
@@ -66,16 +74,28 @@ def _clean_correction(text):
 
 
 def _confirmation_prompt(event):
-    if event.get("type") == "bulk_payment":
-        return f"{event['customer_name']} ka kul {float(event['amount']):g} rupaye baki clear karun? Haan ya nahi boliye."
-    amount = f"{float(event['amount']):g}"
-    customer = event["customer_name"]
-    if event["type"] == "correction":
+    customer = event.get("customer_name") or "customer"
+    amount = f"{float(event.get('amount', 0)):g}"
+    if event.get("type") in {"bulk_payment", "full_settlement"}:
+        return (
+            f"{customer} ka kul {amount} rupaye baki hisaab clear karun? Haan ya nahi boliye. / "
+            f"क्या {customer} का कुल {amount} रुपये बकाया हिसाब चुकता करें? हाँ या नहीं बोलिए।"
+        )
+    if event.get("type") == "correction":
         previous = f"{float(event['meta'].get('previous_amount', 0)):g}"
-        return f"{customer} ki purani entry {previous} rupaye se {amount} rupaye karun? Haan ya nahi boliye."
-    if event["type"] == "payment":
-        return f"Maine {customer} se {amount} rupaye payment suna. Kya ye sahi hai? Haan ya nahi boliye."
-    return f"Maine {customer} ka {amount} rupaye udhaar suna. Kya ise save karun? Haan ya nahi boliye."
+        return (
+            f"{customer} ki purani entry {previous} se {amount} rupaye karun? Haan ya nahi boliye. / "
+            f"क्या {customer} की पुरानी एंट्री {previous} से {amount} रुपये करें? हाँ या नहीं बोलिए।"
+        )
+    if event.get("type") == "payment":
+        return (
+            f"Maine {customer} se {amount} rupaye payment suna. Kya ise save karun? / "
+            f"क्या {customer} से {amount} रुपये जमा दर्ज करें? हाँ या नहीं बोलिए।"
+        )
+    return (
+        f"Maine {customer} ka {amount} rupaye udhaar suna. Kya ise save karun? / "
+        f"क्या {customer} का {amount} रुपये उधार दर्ज करें? हाँ या नहीं बोलिए।"
+    )
 
 
 @asynccontextmanager
@@ -121,7 +141,11 @@ def ledger_apply(payload: dict):
     if not isinstance(events, list) or not events:
         raise HTTPException(status_code=422, detail="provide a non-empty events array or transcript")
     if isinstance(events[0], dict) and events[0].get("type") == "query":
-        return get_customer_balance(events[0].get("customer_name"))
+        cust = events[0].get("customer_name") or get_last_active_customer()
+        return get_customer_balance(cust)
+    for event in events:
+        if isinstance(event, dict) and (not event.get("customer_name") or event.get("is_pronoun")):
+            event["customer_name"] = get_last_active_customer()
     try:
         return apply_ledger_event(events)
     except (ValueError, KeyError) as exc:
@@ -237,54 +261,50 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_json({"type": "clarification", "text": prompt})
                 continue
 
-            # A spoken full-settlement command appends payment events; audit history is retained.
-            full_amount_cue = re.search(r"\b(pura|poora|poore|pure|saara|saare|sab|full|complete)\b", voice_command)
-            repayment_cue = re.search(r"\b(chuka|chukaya|chukadiya|clear|paid|settle|wapas|return|returned|lota|lauta)\b", voice_command)
+            # Full settlement command (e.g. "he returned his whole money", "isne poora paisa de diya", "उसने पूरा पैसा वापस कर दिया")
+            full_amount_cue = bool(re.search(r"\b(pura|poora|poore|pure|saara|saare|sab|full|complete|whole|all)\b", voice_command) or any(w in voice_command for w in ("पूरा", "पूरी", "पूरे", "सारा", "सारे", "सब")))
+            repayment_cue = bool(re.search(r"\b(chuka|chukaya|chukadiya|clear|paid|settle|wapas|wapis|return|returned|lota|lauta|gave)\b", voice_command) or any(w in voice_command for w in ("चुका", "चुकाया", "वापस", "लौटाया", "दिया", "क्लियर", "चुकता")))
+            money_cue = bool(re.search(r"\b(money|paisa|paise|amount|dues|debt|balance|hisaab|hisab)\b", voice_command) or any(w in voice_command for w in ("पैसा", "पैसे", "हिसाब", "बकाया")))
             has_spoken_amount = _amount_in(voice_command) is not None
-            full_settlement = bool(full_amount_cue and repayment_cue and not has_spoken_amount)
-            legacy_settlement = bool(re.search(r"\b(pura|poora|pure)\b.*\b(chuka|chukaya|clear|paid|settle)\b|\b(chuka|chukaya)\s+(diya|diye)\b", voice_command))
-            if full_settlement or legacy_settlement:
-                spoken_names = re.findall(r"\b([a-z]+)\s+ne\b", voice_command)
-                if not spoken_names:
-                    reply = "Kis customer ka poora hisaab clear karna hai? Naam boliye."
+            full_settlement = (full_amount_cue and (repayment_cue or money_cue) and not has_spoken_amount) or (repayment_cue and money_cue and not has_spoken_amount)
+            if full_settlement:
+                summary = get_ledger_summary()
+                balances = {row["customer"].casefold(): row["net_due"] for row in summary}
+                names_map = {row["customer"].casefold(): row["customer"] for row in summary}
+                target_customer = None
+                for c_lower, c_orig in names_map.items():
+                    if c_lower in voice_command.lower():
+                        target_customer = c_orig
+                        break
+                if not target_customer:
+                    target_customer = get_last_active_customer()
+                if not target_customer:
+                    reply = "Kis customer ka poora hisaab clear karna hai? Naam boliye. / किस ग्राहक का पूरा हिसाब क्लियर करना है? नाम बताइए।"
                     await stream_tts(websocket, reply)
                     await websocket.send_json({"type": "clarification", "text": reply})
                     continue
-                balances = {row["customer"].casefold(): row["net_due"] for row in get_ledger_summary()}
-                events_to_commit = []
-                resolved_names = []
-                ambiguous = []
-                for spoken_name in dict.fromkeys(spoken_names):
-                    resolved_name, choices = resolve_customer_name(spoken_name)
-                    if choices:
-                        ambiguous.extend(choices)
-                    elif resolved_name and balances.get(resolved_name.casefold(), 0) > 0:
-                        resolved_names.append(resolved_name)
-                        events_to_commit.append({"type": "payment", "customer_name": resolved_name,
-                            "amount": round(balances[resolved_name.casefold()], 2), "date": date.today().isoformat(),
-                            "confidence": 0.86, "meta": {"source": "spoken_full_settlement"}})
-                if ambiguous:
-                    reply = "Naam clear nahi hai. Kripya poora naam boliye: " + ", ".join(sorted(set(ambiguous))[:4]) + "."
+                total_due = balances.get(target_customer.casefold(), 0.0)
+                if total_due <= 0:
+                    reply = f"{target_customer} ka koi baki udhaar nahi hai. / {target_customer} का कोई बाकी उधार नहीं है।"
                     await stream_tts(websocket, reply)
                     await websocket.send_json({"type": "clarification", "text": reply})
                     continue
-                if not events_to_commit:
-                    reply = "In customers ka koi baki udhaar nahi mila."
-                    await stream_tts(websocket, reply)
-                    await websocket.send_json({"type": "clarification", "text": reply})
-                    continue
-                total = round(sum(event["amount"] for event in events_to_commit), 2)
-                if total > 1000:
-                    pending_event = {"type": "bulk_payment", "customer_name": " aur ".join(resolved_names),
-                        "amount": total, "events": events_to_commit}
-                    prompt = _confirmation_prompt(pending_event)
-                    await stream_tts(websocket, prompt)
-                    await websocket.send_json({"type": "confirmation_required", "event": pending_event, "text": prompt})
-                    continue
-                result = apply_ledger_event(events_to_commit)
-                result["response_string"] = "Poora baki clear ho gaya. " + result["response_string"]
-                await stream_tts(websocket, result["response_string"])
-                await websocket.send_json({"type": "ledger_result", **result})
+                pending_event = {
+                    "type": "bulk_payment",
+                    "customer_name": target_customer,
+                    "amount": round(total_due, 2),
+                    "events": [{
+                        "type": "payment",
+                        "customer_name": target_customer,
+                        "amount": round(total_due, 2),
+                        "date": date.today().isoformat(),
+                        "confidence": 0.95,
+                        "meta": {"source": "spoken_full_settlement"}
+                    }]
+                }
+                prompt = _confirmation_prompt(pending_event)
+                await stream_tts(websocket, prompt)
+                await websocket.send_json({"type": "confirmation_required", "event": pending_event, "text": prompt})
                 continue
 
             if pending_event and pending_event.get("type") == "needs_direction":
@@ -426,19 +446,33 @@ async def websocket_endpoint(websocket: WebSocket):
                 balance = get_customer_balance(resolved_name)
                 await websocket.send_json({"type": "query_result", **balance})
                 continue
-            resolved_name, choices = resolve_customer_name(events[0].get("customer_name"))
-            if choices:
-                pending_event = {"type": "needs_customer", "event": events[0], "choices": choices[:4]}
-                reply = "Kaun se customer: " + " ya ".join(choices[:4]) + "?"
-                await stream_tts(websocket, reply)
-                await websocket.send_json({"type": "clarification", "text": reply})
-                continue
+            if not events[0].get("customer_name") or events[0].get("is_pronoun"):
+                resolved_name = get_last_active_customer()
+                if not resolved_name:
+                    reply = "Kis customer ne paise wapas kiye? Naam batayein. / किस ग्राहक के लिए एंट्री करनी है? नाम बताएं।"
+                    await stream_tts(websocket, reply)
+                    await websocket.send_json({"type": "clarification", "text": reply})
+                    continue
+            else:
+                resolved_name, choices = resolve_customer_name(events[0].get("customer_name"))
+                if choices:
+                    pending_event = {"type": "needs_customer", "event": events[0], "choices": choices[:4]}
+                    reply = "Kaun se customer: " + " ya ".join(choices[:4]) + "?"
+                    await stream_tts(websocket, reply)
+                    await websocket.send_json({"type": "clarification", "text": reply})
+                    continue
             events[0]["customer_name"] = resolved_name
             if pending_event:
                 await websocket.send_json({"type": "confirmation_cancelled", "text": "Pichli draft entry cancel kar di."})
             if events[0].get("amount", 0) <= 1000:
                 result = apply_ledger_event(events)
-                await stream_tts(websocket, result["response_string"])
+                amt = events[0].get("amount", 0)
+                verb = "jama" if events[0].get("type") == "payment" else "udhaar"
+                h_verb = "जमा" if events[0].get("type") == "payment" else "उधार"
+                cur_bal = get_customer_net_due(resolved_name)
+                resp = f"{resolved_name} ka {amt:g} rupaye {verb} ho gaya. Baki balance {cur_bal:g} rupaye hai. / {resolved_name} का {amt:g} रुपये {h_verb} दर्ज हो गया। बाकी बैलेंस {cur_bal:g} रुपये है।"
+                result["response_string"] = resp
+                await stream_tts(websocket, resp)
                 await websocket.send_json({"type": "ledger_result", **result})
             else:
                 pending_event = events[0]

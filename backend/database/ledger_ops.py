@@ -212,6 +212,35 @@ def resolve_customer_name(customer_name):
     return customer_name.strip(), []
 
 
+def get_last_active_customer():
+    """Finds the most recently active customer or single debtor from the ledger."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT customer_name FROM events WHERE customer_name IS NOT NULL AND customer_name != '' ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        if row and row["customer_name"]:
+            return _canonical_customer_name(row["customer_name"])
+    summary = get_ledger_summary()
+    debtors = [r["customer"] for r in summary if r.get("net_due", 0) > 0]
+    if len(debtors) == 1:
+        return debtors[0]
+    if len(summary) == 1:
+        return summary[0]["customer"]
+    return None
+
+
+def get_customer_net_due(customer_name):
+    """Returns the current outstanding net due balance for a customer."""
+    if not customer_name:
+        return 0.0
+    summary = get_ledger_summary()
+    query = customer_name.strip().casefold()
+    for row in summary:
+        if row["customer"].casefold() == query:
+            return float(row["net_due"])
+    return 0.0
+
+
 def get_events(limit=100):
     limit = max(1, min(int(limit), 500))
     with _connect() as conn:
