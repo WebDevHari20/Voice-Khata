@@ -25,10 +25,20 @@ ACTION_WORDS = {
     "di", "kiye", "kiya", "lota", "lauta", "lautaya", "lautaye", "chuka", "chukaya", "chukta",
     "वापस", "लौटाया", "लौटाए", "कर", "दिए", "दिया", "किए", "किया", "चुकता", "चुकाया"
 }
-STOP_WORDS_HINDI = {
-    "उधार", "जमा", "रुपये", "रुपया", "पैसे", "का", "की", "के", "ने", "को", "से", "है",
-    "था", "थी", "थे", "दिया", "दिए", "लिया", "लिए", "कुल", "हिसाब", "कितना", "बाकी",
-    "दिला", "मिला", "वापस", "चुकता", "खाता", "में", "पर"
+STOP_WORDS_ALL = {
+    # Hindi currency & words
+    "रुपए", "रुपये", "रुपया", "रूपये", "रू", "रु", "पैसे", "पैसा", "रकम",
+    "वापिस", "वापस", "किए", "किया", "दिए", "दिया", "दी", "लौटाया", "लौटाए", "लौटा",
+    "चुकाया", "चुकाए", "चुकता", "चुका", "जमा", "आया", "लिया", "लिए",
+    "ने", "को", "से", "का", "की", "के", "है", "हैं", "था", "थी", "थे", "में", "पर",
+    "उधार", "उधारी", "बाकी", "हिसाब", "कुल", "खाता", "एंट्री", "पेमेंट",
+    # Latin / Hinglish
+    "rupaye", "rupay", "rupee", "rupees", "rs", "inr", "paise", "paisa", "rakam", "amount",
+    "wapis", "wapas", "vapis", "vapas", "karrdiye", "kardiye", "kardiya", "karrdiya", "kar", "diye", "diya", "di", "kiye", "kiya",
+    "lota", "lauta", "lautaya", "lautaye", "chuka", "chukaya", "chukadiya", "chukta", "clear", "cleared",
+    "paid", "payment", "received", "repaid", "gave", "mila", "returned", "return", "settle", "settled",
+    "ne", "ko", "se", "ka", "ki", "ke", "hai", "hain", "tha", "the", "me", "mein", "par",
+    "udhaar", "udhar", "credit", "borrowed", "loan", "baaki", "baki", "hisab", "hisaab", "total", "balance",
 }
 
 
@@ -37,7 +47,7 @@ def _name(text, amount_match=None):
         text = text[:amount_match.start()] + " " + text[amount_match.end():]
     text = re.sub(r"(?i)\b(udhaa?r|liya|liye|kiya|kiye|borrowed|loan|baaki|diya|diye|di|jama|aaya|abhi|just|usne|isne|pura|poora|chuka|chukaya|chukadiya|paid|payment|received|repaid|gave|mila|returned|return|wapas|wapis|karrdiye|kardiye|kardiya|karrdiya|lota|lauta|lautaya|lautaye|rupees?|rupiya|rupaye|paise|rs|kal|parso|aaj|ka|ki|ke|ne|ko|se|hai|hain|tha|the|total|hisab|hisaab|kitna|kitne|kitni|baki|balance|owe|owes|owed|how|much|what|is|does|customer|make|it|to|the|not|wrong|error|mistake|actually|should|be|change|correct|batayiye|bataiye|bataye|batana|batado|batao|dikhaye|dikhaiye|please|zara|kripya)\b", " ", text)
     tokens = [t.strip("।,!? \t") for t in text.split()]
-    words = [t for t in tokens if t and t.lower() not in PRONOUNS and t.lower() not in ACTION_WORDS and t not in STOP_WORDS_HINDI and not re.match(r"^\d+(?:\.\d+)?$", t)]
+    words = [t for t in tokens if t and t.lower() not in PRONOUNS and t.lower() not in ACTION_WORDS and t.lower() not in STOP_WORDS_ALL and t not in STOP_WORDS_ALL and not re.match(r"^\d+(?:\.\d+)?$", t)]
     if not words:
         return None
     return " ".join(w.capitalize() if re.match(r"^[A-Za-z]+$", w) else w for w in words)
@@ -62,17 +72,19 @@ def parse_transcript(transcript: str):
     amount = float(match.group(1))
     has_pronoun = any(w.lower() in PRONOUNS for w in text.split())
     name = _name(text, match)
-    explicit_payment = any(w in low for w in ("jama", "aaya", "paid", "payment", "received", "repaid", "mila", "wapas", "wapis", "kardiye", "karrdiye", "lota", "lauta", "lautaya", "returned", "return", "जमा", "आया", "वापस", "लौटाया"))
-    credit_cue = any(w in low for w in ("udhaar", "udhar", "liya", "liye", "borrowed", "loan", "baaki", "baki", "उधार", "लिया", "बाकी"))
-    payment_verb = any(w in low for w in ("diya", "diye", "di", "gave", "lota", "lauta", "lautaya", "lautaye", "wapas", "wapis", "दिया", "दिए"))
-    if explicit_payment or (" se " in f" {low} " and any(w in low for w in ("liya", "liye"))) or " से " in f" {low} ":
+    explicit_payment = any(w in low for w in ("jama", "aaya", "paid", "payment", "received", "repaid", "mila", "wapas", "wapis", "kardiye", "karrdiye", "lota", "lauta", "lautaya", "returned", "return", "जमा", "आया", "वापस", "वापिस", "लौटाया", "लौटाए", "लौटा", "चुकाया", "चुकाए", "चुकता", "चुका", "दिए", "दिया", "किए", "किया"))
+    credit_cue = any(w in low for w in ("udhaar", "udhar", "liya", "liye", "borrowed", "loan", "baaki", "baki", "उधार", "उधारी", "लिया", "बाकी"))
+    payment_verb = any(w in low for w in ("diya", "diye", "di", "gave", "lota", "lauta", "lautaya", "lautaye", "wapas", "wapis", "दिया", "दिए", "वापस", "वापिस", "किए", "किया"))
+    if explicit_payment and not ("udhaar" in low or "udhar" in low or "उधार" in low):
+        kind = "payment"
+    elif explicit_payment or (" se " in f" {low} " and any(w in low for w in ("liya", "liye"))) or " से " in f" {low} ":
         kind = "payment"
     elif payment_verb and "ko" not in low.split() and "को" not in low.split():
         kind = "payment"
     elif credit_cue or (payment_verb and ("ko" in low.split() or "को" in low.split())):
         kind = "credit"
     else:
-        kind = "payment" if any(w in low for w in ("diya", "diye", "gave", "returned", "wapas", "wapis", "वापस", "दिया")) else "credit"
+        kind = "payment" if any(w in low for w in ("diya", "diye", "gave", "returned", "wapas", "wapis", "वापस", "वापिस", "दिया", "दिए", "किए", "किया")) else "credit"
 
     if not name:
         if has_pronoun:

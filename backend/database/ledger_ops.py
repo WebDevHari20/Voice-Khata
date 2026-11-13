@@ -21,16 +21,21 @@ if db_env:
 else:
     DB_PATH = DEFAULT_DB
 EVENT_TYPES = {"credit", "payment", "correction", "query", "undo"}
-NAME_FILLERS = {"abhi", "just", "usne", "kiye", "kiya", "rupiya", "rupaye", "rupees", "lota", "lauta", "lautaya", "lautaye", "wapas", "returned", "return"}
+NAME_FILLERS = {
+    "abhi", "just", "usne", "isne", "kiye", "kiya", "rupiya", "rupaye", "rupees", "rs", "inr",
+    "lota", "lauta", "lautaya", "lautaye", "wapas", "wapis", "vapas", "vapis", "returned", "return",
+    "kardiye", "karrdiye", "kardiya", "karrdiya", "diya", "diye",
+    "रुपए", "रुपये", "रुपया", "रूपये", "रू", "रु", "पैसे", "पैसा", "वापिस", "वापस",
+    "किए", "किया", "दिया", "दिए", "ने", "को", "का", "की", "के", "लौटाया", "लौटाए"
+}
 
 
 def _canonical_customer_name(name):
     if not isinstance(name, str):
         return name
     words = name.split()
-    # Speech filler often leaks into names (for example, "Ramesh abhi just usne").
-    cleaned = [word for index, word in enumerate(words) if not (index > 0 and word.casefold() in NAME_FILLERS)]
-    return " ".join(cleaned).strip()
+    cleaned = [word for word in words if word.casefold() not in NAME_FILLERS and word not in NAME_FILLERS]
+    return " ".join(cleaned).strip() or name.strip()
 
 
 def _connect():
