@@ -13,3 +13,9 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_customer ON events(customer_name, date);
 CREATE INDEX IF NOT EXISTS idx_events_corrects ON events(corrects);
+CREATE TABLE IF NOT EXISTS customer_preferences (
+    customer_key TEXT PRIMARY KEY,
+    customer_name TEXT NOT NULL,
+    reminders_opt_in INTEGER NOT NULL DEFAULT 0 CHECK(reminders_opt_in IN (0, 1)),
+    consent_updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

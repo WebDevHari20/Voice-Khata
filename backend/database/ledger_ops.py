@@ -11,6 +11,16 @@ DB_PATH = Path(os.getenv("DATABASE_PATH", str(DEFAULT_DB)))
 if not DB_PATH.is_absolute():
     DB_PATH = (Path(__file__).resolve().parents[2] / DB_PATH).resolve()
 EVENT_TYPES = {"credit", "payment", "correction", "query", "undo"}
+NAME_FILLERS = {"abhi", "just", "usne", "kiye", "kiya", "rupiya", "rupaye", "rupees", "lota", "lauta", "lautaya", "lautaye", "wapas", "returned", "return"}
+
+
+def _canonical_customer_name(name):
+    if not isinstance(name, str):
+        return name
+    words = name.split()
+    # Speech filler often leaks into names (for example, "Ramesh abhi just usne").
+    cleaned = [word for index, word in enumerate(words) if not (index > 0 and word.casefold() in NAME_FILLERS)]
+    return " ".join(cleaned).strip()
 
 
 def _connect():
@@ -44,7 +54,7 @@ def _validate_event(event):
             raise ValueError("customer_name is required")
         if isinstance(amount, bool) or not isinstance(amount, (float, int)) or amount <= 0:
             raise ValueError("amount must be a positive number")
-        event["customer_name"] = name.strip()
+        event["customer_name"] = _canonical_customer_name(name)
         event["amount"] = round(float(amount), 2)
     if kind in {"correction", "undo"} and not event.get("corrects"):
         raise ValueError(f"{kind} events require corrects event_id")
@@ -84,7 +94,7 @@ def _active_events(conn):
             SELECT 1 FROM events r WHERE r.status='committed'
               AND r.type IN ('correction','undo') AND r.corrects=e.event_id
           )
-        ORDER BY e.date, e.rowid
+        ORDER BY e.rowid
     """).fetchall()
 
 
@@ -94,7 +104,7 @@ def get_ledger_summary():
     totals = {}
     daily = {}
     for row in rows:
-        name = row["customer_name"] or row["customer_id"] or "Unknown"
+        name = _canonical_customer_name(row["customer_name"]) or row["customer_id"] or "Unknown"
         key = (row["customer_id"], name)
         entry_kind = row["type"]
         if entry_kind == "correction":
@@ -105,7 +115,91 @@ def get_ledger_summary():
         daily[day_key] = daily.get(day_key, 0.0) + (row["amount"] if entry_kind == "credit" else -row["amount"])
     return [{"customer_id": cid, "customer": name, "net_due": round(amount, 2),
              "by_day": [{"date": day, "net_due": round(value, 2)} for (k, day), value in daily.items() if k == (cid, name)]}
-            for (cid, name), amount in totals.items()]
+            for (cid, name), amount in totals.items() if round(amount, 2) != 0]
+
+
+def get_daily_credit_total(day=None):
+    day = day or date.today().isoformat()
+    with _connect() as conn:
+        rows = _active_events(conn)
+    total = 0.0
+    for row in rows:
+        if row["date"] != day:
+            continue
+        kind = row["type"]
+        if kind == "correction":
+            kind = json.loads(row["meta"] or "{}").get("replacement_type", "credit")
+        if kind == "credit":
+            total += float(row["amount"] or 0)
+    return round(total, 2)
+
+
+def get_reminder_consent(customer_name):
+    key = _canonical_customer_name(customer_name).casefold()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT customer_name, reminders_opt_in, consent_updated_at FROM customer_preferences WHERE customer_key=?",
+            (key,),
+        ).fetchone()
+    return {"customer_name": row["customer_name"] if row else _canonical_customer_name(customer_name),
+            "opted_in": bool(row["reminders_opt_in"]) if row else False,
+            "consent_updated_at": row["consent_updated_at"] if row else None}
+
+
+def set_reminder_consent(customer_name, opted_in):
+    canonical = _canonical_customer_name(customer_name)
+    key = canonical.casefold()
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO customer_preferences (customer_key, customer_name, reminders_opt_in, consent_updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(customer_key) DO UPDATE SET
+                customer_name=excluded.customer_name,
+                reminders_opt_in=excluded.reminders_opt_in,
+                consent_updated_at=CURRENT_TIMESTAMP
+        """, (key, canonical, int(opted_in)))
+    return get_reminder_consent(canonical)
+
+
+def prepare_reminder(customer_name):
+    canonical, choices = resolve_customer_name(customer_name)
+    if choices:
+        return {"eligible": False, "reason": "ambiguous_customer", "choices": choices}
+    if not canonical:
+        return {"eligible": False, "reason": "unknown_customer"}
+    consent = get_reminder_consent(canonical)
+    if not consent["opted_in"]:
+        return {"eligible": False, "reason": "customer_has_not_opted_in", "customer_name": canonical}
+    match = next((row for row in get_ledger_summary() if row["customer"].casefold() == canonical.casefold()), None)
+    if not match or match["net_due"] <= 0:
+        return {"eligible": False, "reason": "no_outstanding_amount", "customer_name": canonical}
+    amount = round(match["net_due"], 2)
+    message = (f"Namaste {canonical}, aapke hisaab mein ₹{amount:g} baki dikh raha hai. "
+               "Jab suvidha ho, kripya hisaab dekh lein. Agar payment ho chuki hai, "
+               "to is sandesh ko nazarandaaz karein. Dhanyavaad.")
+    return {"eligible": True, "customer_name": canonical, "amount": amount, "message": message,
+            "delivery": "preview_only"}
+
+
+def resolve_customer_name(customer_name):
+    """Resolve a spoken partial name only when it identifies one ledger customer."""
+    if not customer_name:
+        return None, []
+    names = sorted({row["customer"] for row in get_ledger_summary()})
+    query = _canonical_customer_name(customer_name.strip()).casefold()
+    exact = [name for name in names if name.casefold() == query]
+    matches = [name for name in names if name.casefold().startswith(query)]
+    if len(matches) > 1:
+        return None, matches
+    if len(exact) == 1:
+        return exact[0], []
+    if len(exact) > 1:
+        return None, exact
+    if len(matches) == 1:
+        return matches[0], []
+    if len(matches) > 1:
+        return None, matches
+    return customer_name.strip(), []
 
 
 def get_events(limit=100):
@@ -115,6 +209,22 @@ def get_events(limit=100):
     result = []
     for row in rows:
         item = dict(row)
+        item["customer_name"] = _canonical_customer_name(item.get("customer_name"))
+        try:
+            item["meta"] = json.loads(item["meta"] or "{}")
+        except json.JSONDecodeError:
+            pass
+        result.append(item)
+    return result
+
+
+def get_all_events():
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM events ORDER BY rowid DESC").fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["customer_name"] = _canonical_customer_name(item.get("customer_name"))
         try:
             item["meta"] = json.loads(item["meta"] or "{}")
         except json.JSONDecodeError:
@@ -125,7 +235,10 @@ def get_events(limit=100):
 
 def get_customer_balance(customer_name=None):
     balances = get_ledger_summary()
-    matches = [item for item in balances if not customer_name or item["customer"].casefold() == customer_name.casefold()]
+    resolved, choices = resolve_customer_name(customer_name)
+    if choices:
+        return {"balances": [], "response_string": "Kaun se customer ka hisaab? " + ", ".join(choices[:4]) + "."}
+    matches = [item for item in balances if not resolved or item["customer"].casefold() == resolved.casefold()]
     if not matches:
         return {"balances": [], "response_string": f"{customer_name or 'Customer'} ka koi hisaab nahi mila."}
     if len(matches) == 1:
@@ -135,3 +248,32 @@ def get_customer_balance(customer_name=None):
     else:
         answer = "Hisaab mil gaya. Kripya customer ka poora naam batayein."
     return {"balances": matches, "response_string": answer}
+
+
+def prepare_latest_correction(amount, customer_name=None):
+    """Build an uncommitted correction draft for the latest active ledger event."""
+    with _connect() as conn:
+        active = _active_events(conn)
+        target = next(
+            (row for row in reversed(active)
+             if not customer_name or (row["customer_name"] or "").casefold() == customer_name.casefold()),
+            None,
+        )
+    if target is None:
+        return None
+    target_kind = target["type"]
+    if target_kind == "correction":
+        target_kind = json.loads(target["meta"] or "{}").get("replacement_type", "credit")
+    return {
+        "type": "correction",
+        "customer_id": target["customer_id"],
+        "customer_name": target["customer_name"],
+        "amount": float(amount),
+        "date": target["date"],
+        "confidence": 0.86,
+        "corrects": target["event_id"],
+        "meta": {
+            "replacement_type": target_kind,
+            "previous_amount": target["amount"],
+        },
+    }

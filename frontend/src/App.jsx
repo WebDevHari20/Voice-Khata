@@ -1,34 +1,420 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000'
+
+function Icon({ name, size = 20 }) {
+  const props = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }
+  const shapes = {
+    mic: <><rect x="8" y="3" width="8" height="12" rx="4" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3m-4 0h8" /></>,
+    stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
+    book: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v17H6.5A2.5 2.5 0 0 1 4 17.5z" /><path d="M4 6h13M8 10h8m-8 4h8" /></>,
+    arrow: <><path d="M5 12h14m-6-6 6 6-6 6" /></>,
+    plus: <><path d="M12 5v14M5 12h14" /></>,
+    refresh: <><path d="M20 7v5h-5M4 17v-5h5" /><path d="M5.5 9a7 7 0 0 1 11.6-2L20 12M4 12l2.9 5a7 7 0 0 0 11.6-2" /></>,
+    wave: <path d="M3 10v4m4-8v12m4-15v18m4-14v10m4-13v16m3-11v6" />,
+    check: <path d="m5 12 4 4L19 6" />,
+    alert: <><path d="M12 9v4m0 4h.01" /><path d="M10.3 3.9 2.7 17a2 2 0 0 0 1.7 3h15.2a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" /></>,
+  }
+  return <svg {...props}>{shapes[name] || null}</svg>
+}
+
+const money = (value) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(value || 0)
+const shortDate = (value) => value ? new Date(value + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) : ''
+
+function speakAnswer(text) {
+  if (!('speechSynthesis' in window) || !text) return false
+  window.speechSynthesis.cancel()
+  const utterance = new SpeechSynthesisUtterance(text)
+  utterance.lang = 'hi-IN'
+  utterance.rate = 1.02
+  window.speechSynthesis.speak(utterance)
+  return true
+}
+
+function downsample(input, inputRate, outputRate = 16000) {
+  const ratio = inputRate / outputRate
+  if (ratio === 1) return input
+  const output = new Float32Array(Math.floor(input.length / ratio))
+  for (let i = 0; i < output.length; i += 1) {
+    const start = Math.floor(i * ratio)
+    const end = Math.min(Math.floor((i + 1) * ratio), input.length)
+    let sum = 0
+    for (let j = start; j < end; j += 1) sum += input[j]
+    output[i] = sum / Math.max(1, end - start)
+  }
+  return output
+}
+
+function pcmFrame(samples) {
+  const buffer = new ArrayBuffer(1024)
+  const view = new DataView(buffer)
+  for (let i = 0; i < 512; i += 1) {
+    const sample = Math.max(-1, Math.min(1, samples[i] || 0))
+    view.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true)
+  }
+  return buffer
+}
+
 function App() {
-  const [count, setCount] = useState(0)
+  const [balances, setBalances] = useState([])
+  const [events, setEvents] = useState([])
+  const [reminderConsents, setReminderConsents] = useState({})
+  const [reminderPreview, setReminderPreview] = useState(null)
+  const [backendOnline, setBackendOnline] = useState(false)
+  const [socketStatus, setSocketStatus] = useState('disconnected')
+  const [recording, setRecording] = useState(false)
+  const [handsFree, setHandsFree] = useState(false)
+  const [transcript, setTranscript] = useState('')
+  const [reply, setReply] = useState('')
+  const [pendingEvent, setPendingEvent] = useState(null)
+  const [typedText, setTypedText] = useState('')
+  const [error, setError] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
+  const socketRef = useRef(null)
+  const captureRef = useRef(null)
+  const bufferRef = useRef([])
+
+  const refreshLedger = useCallback(async () => {
+    setRefreshing(true)
+    try {
+      const results = await Promise.all([
+        fetch(API_BASE + '/ledger/summary'),
+        fetch(API_BASE + '/ledger/events?limit=12'),
+      ])
+      if (!results[0].ok || !results[1].ok) throw new Error('Ledger could not be loaded')
+      const currentBalances = await results[0].json()
+      setBalances(currentBalances)
+      setEvents(await results[1].json())
+      const consentEntries = await Promise.all(currentBalances.map(async (customer) => {
+        try {
+          const response = await fetch(API_BASE + '/customers/' + encodeURIComponent(customer.customer) + '/reminder-consent')
+          const consent = await response.json()
+          return [customer.customer, consent.opted_in]
+        } catch { return [customer.customer, false] }
+      }))
+      setReminderConsents(Object.fromEntries(consentEntries))
+      setBackendOnline(true)
+      setError('')
+    } catch {
+      setBackendOnline(false)
+      setError('Can’t reach the backend. Start it at 127.0.0.1:8000 and try again.')
+    } finally {
+      setRefreshing(false)
+    }
+  }, [])
+
+  const updateReminderConsent = useCallback(async (customer, optedIn) => {
+    try {
+      const response = await fetch(API_BASE + '/customers/' + encodeURIComponent(customer) + '/reminder-consent', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ opted_in: optedIn }),
+      })
+      if (!response.ok) throw new Error('Consent setting could not be saved')
+      setReminderConsents((previous) => ({ ...previous, [customer]: optedIn }))
+      setReply(optedIn ? `${customer} opted in to polite reminders.` : `${customer} opted out of reminders.`)
+    } catch (cause) {
+      setError(cause.message || 'Consent setting could not be saved')
+    }
+  }, [])
+
+  const previewReminder = useCallback(async (customer) => {
+    try {
+      const response = await fetch(API_BASE + '/reminders/prepare', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_name: customer }),
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.detail || 'Reminder preview could not be prepared')
+      if (!result.eligible) {
+        setReply(result.reason === 'customer_has_not_opted_in' ? 'No reminder prepared: this customer has not opted in.' : 'No reminder is needed for this balance.')
+        setReminderPreview(null)
+        return
+      }
+      setReminderPreview(result)
+    } catch (cause) {
+      setError(cause.message || 'Reminder preview could not be prepared')
+    }
+  }, [])
+
+  const downloadExcel = useCallback(async () => {
+    try {
+      const response = await fetch(API_BASE + '/ledger/export.xlsx')
+      if (!response.ok) throw new Error('Excel file could not be created')
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = 'voice-khata.xlsx'
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (cause) {
+      setError(cause.message || 'Excel file could not be downloaded')
+    }
+  }, [])
+
+  const openInExcel = useCallback(() => {
+    const workbookUrl = API_BASE + '/ledger/export.xlsx'
+    window.location.href = 'ms-excel:ofe|u|' + workbookUrl
+  }, [])
+
+  const openSocket = useCallback(() => new Promise((resolve, reject) => {
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      resolve(socketRef.current)
+      return
+    }
+    const socket = new WebSocket(API_BASE.replace(/^http/, 'ws') + '/stream')
+    socket.binaryType = 'arraybuffer'
+    socketRef.current = socket
+    setSocketStatus('connecting')
+    socket.onopen = () => {
+      setSocketStatus('connected')
+      socket.send(JSON.stringify({ type: 'configure', sample_rate: 16000, language_code: 'indic-auto' }))
+      resolve(socket)
+    }
+    socket.onmessage = (message) => {
+      let data
+      try { data = JSON.parse(message.data) } catch { return }
+      if (data.type === 'transcript') {
+        setTranscript(data.text || '')
+        setReply('')
+      } else if (data.type === 'control' && data.action === 'stop_listening') {
+        const capture = captureRef.current
+        if (capture) {
+          capture.processor.onaudioprocess = null
+          capture.processor.disconnect()
+          capture.source.disconnect()
+          capture.mute.disconnect()
+          capture.stream.getTracks().forEach((track) => track.stop())
+          capture.context.close()
+          captureRef.current = null
+        }
+        setHandsFree(false)
+        setRecording(false)
+        setSocketStatus('connected')
+        setReply('Listening stopped.')
+      } else if (data.type === 'clarification') {
+        setReply(data.text || 'Please say that again.')
+      } else if (data.type === 'confirmation_required') {
+        setPendingEvent(data.event || null)
+        setReply(data.text || 'Please confirm the entry.')
+      } else if (data.type === 'confirmation_cancelled') {
+        setPendingEvent(null)
+        setReply(data.text || 'Entry cancelled.')
+      } else if (data.type === 'query_result') {
+        setReply(data.response_string || 'Here is the balance.')
+        if (!speakAnswer(data.response_string)) {
+          fetch(API_BASE + '/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: data.response_string || 'Here is the balance.' }) })
+            .then((response) => response.ok ? response.blob() : Promise.reject(new Error('Speech unavailable')))
+            .then((blob) => new Audio(URL.createObjectURL(blob)).play())
+            .catch(() => {})
+        }
+        refreshLedger()
+      } else if (data.type === 'ledger_result') {
+        setPendingEvent(null)
+        setReply(data.response_string || 'Done.')
+        refreshLedger()
+      } else if (data.type === 'audio_chunk' && data.audio) {
+        const audio = new Audio('data:' + (data.mime_type || 'audio/wav') + ';base64,' + data.audio)
+        const fallbackSpeech = () => {
+          if (!speakAnswer(data.text)) setError('Audio playback was blocked by the browser.')
+        }
+        audio.onerror = fallbackSpeech
+        audio.play().catch(fallbackSpeech)
+      } else if (data.type === 'tts_text') {
+        setReply(data.text || '')
+        if (!speakAnswer(data.text)) setError('Speech playback is unavailable in this browser.')
+      } else if (['provider_unavailable', 'provider_error', 'error'].includes(data.type)) {
+        setError(data.detail || data.message || 'Speech service returned an error.')
+      }
+    }
+    socket.onerror = () => {
+      setSocketStatus('error')
+      reject(new Error('Could not open the voice connection'))
+    }
+    socket.onclose = () => {
+      setSocketStatus('disconnected')
+      if (socketRef.current === socket) socketRef.current = null
+    }
+  }), [refreshLedger])
+
+  const startRecording = useCallback(async () => {
+    setError('')
+    setTranscript('')
+    setReply('')
+    try {
+      const socket = await openSocket()
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Microphone access is unavailable in this browser.')
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+      const context = new AudioContext()
+      const source = context.createMediaStreamSource(stream)
+      const processor = context.createScriptProcessor(1024, 1, 1)
+      const mute = context.createGain()
+      mute.gain.value = 0
+      bufferRef.current = []
+      processor.onaudioprocess = (event) => {
+        const samples = downsample(event.inputBuffer.getChannelData(0), context.sampleRate)
+        bufferRef.current.push(...samples)
+        while (bufferRef.current.length >= 512) {
+          const frame = bufferRef.current.splice(0, 512)
+          if (socket.readyState === WebSocket.OPEN) socket.send(pcmFrame(frame))
+        }
+      }
+      source.connect(processor)
+      processor.connect(mute)
+      mute.connect(context.destination)
+      captureRef.current = { stream, context, source, processor, mute }
+      setRecording(true)
+      setSocketStatus('listening')
+      return true
+    } catch (cause) {
+      setError(cause.message || 'Could not start microphone.')
+      setRecording(false)
+      return false
+    }
+  }, [openSocket])
+
+  const stopRecording = useCallback(async () => {
+    const capture = captureRef.current
+    if (!capture) return
+    capture.processor.onaudioprocess = null
+    capture.processor.disconnect()
+    capture.source.disconnect()
+    capture.mute.disconnect()
+    capture.stream.getTracks().forEach((track) => track.stop())
+    await capture.context.close()
+    captureRef.current = null
+    const socket = socketRef.current
+    const pending = bufferRef.current
+    bufferRef.current = []
+    if (pending.length && socket && socket.readyState === WebSocket.OPEN) socket.send(pcmFrame(pending))
+    setRecording(false)
+    setSocketStatus('processing')
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const silence = new Float32Array(512)
+      for (let i = 0; i < 20; i += 1) {
+        socket.send(pcmFrame(silence))
+        await new Promise((resolve) => window.setTimeout(resolve, 32))
+      }
+      setSocketStatus('connected')
+    }
+  }, [])
+
+  const toggleRecording = useCallback(() => {
+    if (recording) {
+      setHandsFree(false)
+      stopRecording()
+    }
+    else startRecording()
+  }, [recording, startRecording, stopRecording])
+
+  const toggleHandsFree = useCallback(async () => {
+    if (handsFree) {
+      setHandsFree(false)
+      if (recording) await stopRecording()
+      return
+    }
+    if (recording) return
+    const started = await startRecording()
+    if (started) setHandsFree(true)
+  }, [handsFree, recording, startRecording, stopRecording])
+
+  const confirmPending = useCallback(async (answer) => {
+    try {
+      const socket = await openSocket()
+      socket.send(JSON.stringify({ transcript: answer, confidence: 0.95 }))
+      setSocketStatus('processing')
+      setError('')
+    } catch (cause) {
+      setError(cause.message || 'Could not confirm this entry.')
+    }
+  }, [openSocket])
+
+  const submitTyped = useCallback(async (event) => {
+    event.preventDefault()
+    const text = typedText.trim()
+    if (!text) return
+    try {
+      const socket = await openSocket()
+      socket.send(JSON.stringify({ transcript: text, confidence: 0.95 }))
+      setTranscript(text)
+      setTypedText('')
+      setReply('')
+      setSocketStatus('processing')
+      setError('')
+    } catch (cause) {
+      setError(cause.message || 'Could not send that entry.')
+    }
+  }, [openSocket, typedText])
+
+  useEffect(() => {
+    const initialLoad = window.setTimeout(() => refreshLedger(), 0)
+    return () => {
+      window.clearTimeout(initialLoad)
+      const capture = captureRef.current
+      if (capture) {
+        capture.processor.disconnect()
+        capture.source.disconnect()
+        capture.stream.getTracks().forEach((track) => track.stop())
+        capture.context.close()
+      }
+      if (socketRef.current) socketRef.current.close()
+    }
+  }, [refreshLedger])
+
+  const totalOwed = useMemo(() => balances.reduce((sum, row) => sum + Math.max(0, Number(row.net_due) || 0), 0), [balances])
+  const status = recording ? 'Listening' : socketStatus === 'processing' ? 'Working' : backendOnline ? 'Ready' : 'Offline'
 
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.jsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
+    <div className="app-shell">
+      <header className="topbar">
+        <a className="brand" href="#top" aria-label="Voice Khata home"><span className="brand-mark"><Icon name="book" size={20} /></span><span>voice<span className="brand-light">khata</span></span></a>
+        <div className="topbar-right">
+          <span className={'connection-pill ' + (backendOnline ? 'is-online' : 'is-offline')}><span className="connection-dot" />{backendOnline ? 'Backend connected' : 'Backend offline'}</span>
+          <button className="icon-button" onClick={refreshLedger} disabled={refreshing} aria-label="Refresh ledger" title="Refresh ledger"><Icon name="refresh" size={18} /></button>
+        </div>
+      </header>
+
+      <main id="top" className="page-content">
+        <section className="welcome-row">
+          <div><p className="eyebrow">YOUR DIGITAL BAHI KHATA</p><h1>Good business starts<br className="desktop-break" /> with a clear hisaab.</h1><p className="welcome-copy">Speak naturally. Every udhaar and payment stays organized.</p></div>
+          <div className="today-chip"><span>✳</span>{new Date().toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}</div>
+        </section>
+
+        <section className="summary-grid" aria-label="Ledger overview">
+          <article className="summary-card summary-primary"><div className="summary-label">TOTAL TO COLLECT <span className="summary-icon"><Icon name="book" size={16} /></span></div><div className="summary-value">{money(totalOwed)}</div><div className="summary-foot">Across {balances.length} {balances.length === 1 ? 'customer' : 'customers'}</div></article>
+          <article className="summary-card"><div className="summary-label">CUSTOMERS</div><div className="summary-value">{String(balances.length).padStart(2, '0')}</div><div className="summary-foot">With an active balance</div></article>
+          <article className="summary-card summary-note"><div className="summary-label">VOICE ASSISTANT</div><div className="summary-note-row"><span className="assistant-avatar"><Icon name="wave" size={17} /></span><div><strong>Speak your bahi</strong><span>Hindi & Hinglish ready</span></div></div><div className="summary-foot"><span className="mini-dot" />{status} for your next entry</div></article>
+        </section>
+
+        <section className="workspace-grid">
+          <div className="voice-panel panel">
+            <div className="panel-heading"><div><p className="eyebrow">QUICK ENTRY</p><h2>What happened today?</h2></div><span className="live-tag"><span /> LIVE</span></div>
+            <p className="panel-description">Press the mic and say a name, amount, and what it was for.</p>
+            <div className={'voice-orbit ' + (recording ? 'recording' : '')}><div className="orbit-ring orbit-ring-one" /><div className="orbit-ring orbit-ring-two" /><button className={'mic-button ' + (recording ? 'mic-active' : '')} onClick={toggleRecording} aria-label={recording ? 'Stop recording' : 'Start voice entry'}><Icon name={recording ? 'stop' : 'mic'} size={29} /></button></div>
+            <div className="voice-action-label">{recording ? (handsFree ? 'Hands-free is listening · tap mic to stop' : 'Tap to finish speaking') : 'Tap to speak'}</div>
+            <button className={'handsfree-toggle ' + (handsFree ? 'handsfree-on' : '')} onClick={toggleHandsFree} disabled={recording && !handsFree}>
+              <span className="handsfree-dot" />{handsFree ? 'Hands-free mode on' : 'Turn on hands-free mode'}
+            </button>
+            {handsFree && <div className="handsfree-help">Say “stop listening” when you’re done.</div>}
+            <div className="voice-hint">Try <b>“Ramesh ko 340 udhaar”</b> or <b>“Ramesh ka total?”</b></div>
+            {(transcript || reply || pendingEvent) && <div className="conversation-card" aria-live="polite">{transcript && <div className="conversation-line"><span className="conversation-label">YOU SAID</span><p>“{transcript}”</p></div>}{reply && <div className="conversation-line reply-line"><span className="conversation-label"><Icon name="check" size={13} /> KHATA</span><p>{reply}</p></div>}{pendingEvent && <div className="confirmation-actions"><div className="confirmation-summary"><strong>{pendingEvent.customer_name}</strong><span>{pendingEvent.type === 'payment' ? 'payment' : pendingEvent.type === 'correction' ? 'corrected balance' : 'udhaar'} · {money(pendingEvent.amount)}</span></div><div className="confirmation-buttons"><button type="button" className="confirm-button" onClick={() => confirmPending('haan')}>Confirm entry</button><button type="button" className="decline-button" onClick={() => confirmPending('nahi')}>No, cancel</button></div><small>Or say “nahi, 430” to correct the amount.</small></div>}</div>}
+            <form className="type-entry" onSubmit={submitTyped}><label htmlFor="typed-entry">Or type a phrase</label><div className="type-entry-row"><input id="typed-entry" value={typedText} onChange={(event) => setTypedText(event.target.value)} placeholder="e.g. Sita ko 500 udhaar" /><button type="submit" className="send-button" disabled={!typedText.trim()} aria-label="Send phrase"><Icon name="arrow" size={18} /></button></div></form>
+            {error && <div className="error-message" role="alert"><Icon name="alert" size={16} />{error}</div>}
+            <div className="privacy-note"><span>●</span>Your ledger stays on this device.</div>
+          </div>
+
+          <div className="ledger-panel panel">
+            <div className="panel-heading ledger-heading"><div><p className="eyebrow">CUSTOMER LEDGER</p><h2>Who owes you</h2></div><div className="ledger-actions"><button className="export-button" onClick={downloadExcel}>Download Excel</button><button className="export-button" onClick={openInExcel}>Open in Excel</button><button className="text-button" onClick={refreshLedger} disabled={refreshing}>{refreshing ? 'Updating…' : 'Refresh'} <Icon name="refresh" size={15} /></button></div></div>
+            {balances.length ? <div className="customer-list"><div className="customer-row customer-row-heading"><span>Name</span><span>Balance status</span><span>Total amount</span></div>{balances.map((customer) => <article className="customer-row" key={(customer.customer_id || '') + '-' + customer.customer}><div className="customer-info"><strong>{customer.customer}</strong><label className="reminder-consent"><input type="checkbox" checked={Boolean(reminderConsents[customer.customer])} onChange={(event) => updateReminderConsent(customer.customer, event.target.checked)} /> Customer opted in to reminders</label>{reminderConsents[customer.customer] && <button type="button" className="reminder-preview-button" onClick={() => previewReminder(customer.customer)}>Preview polite reminder</button>}</div><div className={'customer-status ' + (customer.net_due < 0 ? 'credit-balance' : '')}>{customer.net_due < 0 ? 'You owe' : 'Owes you'}</div><div className={'customer-balance ' + (customer.net_due < 0 ? 'credit-balance' : '')}><strong>{money(Math.abs(customer.net_due))}</strong></div></article>)}</div> : <div className="empty-ledger"><div className="empty-icon"><Icon name="book" size={23} /></div><strong>Your ledger is ready</strong><p>New customer balances will show up here after your first entry.</p></div>}
+            {reminderPreview && <aside className="reminder-preview"><strong>Polite reminder preview · {reminderPreview.customer_name}</strong><p>{reminderPreview.message}</p><small>Preview only. No message was sent.</small><button type="button" onClick={() => setReminderPreview(null)}>Close</button></aside>}
+            <div className="recent-heading"><div><p className="eyebrow">RECENT ACTIVITY</p><h3>Latest entries</h3></div><span className="recent-count">{events.length} entries</span></div>
+            {events.length ? <div className="activity-list">{events.slice(0, 5).map((entry) => <div className="activity-row" key={entry.event_id}><span className={'activity-mark ' + (entry.type === 'payment' ? 'payment-mark' : '')}><Icon name={entry.type === 'payment' ? 'check' : entry.type === 'correction' ? 'refresh' : 'plus'} size={14} /></span><div className="activity-main"><strong>{entry.customer_name || entry.type}</strong><span>{entry.type === 'payment' ? 'Payment received' : entry.type === 'credit' ? 'Udhaar added' : entry.type === 'correction' ? 'Entry corrected' : entry.type} · {shortDate(entry.date)}</span></div><strong className={'activity-amount ' + (entry.type === 'payment' ? 'payment-amount' : '')}>{entry.type === 'payment' ? '−' : entry.type === 'correction' ? '↻ ' : '+'}{money(entry.amount)}</strong></div>)}</div> : <p className="no-activity">Your recent entries will appear here.</p>}
+          </div>
+        </section>
+        <footer className="page-footer"><span>VOICE KHATA</span><span>Simple hisaab. Peace of mind.</span></footer>
+      </main>
+    </div>
   )
 }
 

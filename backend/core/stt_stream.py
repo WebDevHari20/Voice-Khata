@@ -17,6 +17,9 @@ def _api_key():
 
 async def _connect_prisma(key, sample_rate, language_code):
     from websockets.asyncio.client import connect
+    from ..database.ledger_ops import get_ledger_summary
+
+    customer_names = [row["customer"] for row in get_ledger_summary()][:200]
 
     return await connect(
         STT_URL,
@@ -26,6 +29,10 @@ async def _connect_prisma(key, sample_rate, language_code):
             "model": "prisma-v3.0",
             "format": "transliterate",
             "x-sample-rate": str(sample_rate),
+            "topic": "Kirana shop ledger: customer names, udhaar, payments, rupee amounts, and dates.",
+            "keyterms": json.dumps(customer_names, ensure_ascii=False),
+            "x-min-speech-ms": "180",
+            "x-min-silence-ms": "500",
         },
         open_timeout=15,
         max_size=None,
@@ -62,6 +69,12 @@ async def stream_audio_to_stt(websocket):
                         language_code = payload.get("language_code", language_code)
                         if sample_rate not in {8000, 16000, 44100, 48000}:
                             await websocket.send_json({"type": "error", "detail": "sample_rate must be 8000, 16000, 44100, or 48000"})
+                        elif key and provider is None:
+                            try:
+                                provider = await _connect_prisma(key, sample_rate, language_code)
+                                provider_read = asyncio.create_task(provider.recv())
+                            except Exception as exc:
+                                await websocket.send_json({"type": "provider_error", "detail": f"Prisma connection failed: {exc}"})
                     else:
                         await websocket.send_json({"type": "error", "detail": "send transcript text, a configure frame, or raw PCM audio"})
                 elif message.get("bytes") is not None:
