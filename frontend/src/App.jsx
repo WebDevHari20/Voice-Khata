@@ -23,6 +23,10 @@ function Icon({ name, size = 20 }) {
     wave: <path d="M3 10v4m4-8v12m4-15v18m4-14v10m4-13v16m3-11v6" />,
     check: <path d="m5 12 4 4L19 6" />,
     alert: <><path d="M12 9v4m0 4h.01" /><path d="M10.3 3.9 2.7 17a2 2 0 0 0 1.7 3h15.2a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" /></>,
+    back: <path d="m15 18-6-6 6-6" />,
+    user: <><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></>,
+    search: <><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></>,
+    close: <path d="M18 6 6 18M6 6l12 12" />,
   }
   return <svg {...props}>{shapes[name] || null}</svg>
 }
@@ -67,6 +71,9 @@ function pcmFrame(samples) {
 function App() {
   const [balances, setBalances] = useState([])
   const [events, setEvents] = useState([])
+  const [selectedCustomer, setSelectedCustomer] = useState(null)
+  const [customerHistoryData, setCustomerHistoryData] = useState(null)
+  const [customerSearch, setCustomerSearch] = useState('')
   const [reminderConsents, setReminderConsents] = useState({})
   const [reminderPreview, setReminderPreview] = useState(null)
   const [backendOnline, setBackendOnline] = useState(false)
@@ -94,12 +101,13 @@ function App() {
     try {
       const results = await Promise.all([
         fetch(API_BASE + '/ledger/summary'),
-        fetch(API_BASE + '/ledger/events?limit=12'),
+        fetch(API_BASE + '/ledger/events?limit=100'),
       ])
       if (!results[0].ok || !results[1].ok) throw new Error('Ledger could not be loaded from backend (' + API_BASE + ')')
       const currentBalances = await results[0].json()
+      const currentEvents = await results[1].json()
       setBalances(currentBalances)
-      setEvents(await results[1].json())
+      setEvents(currentEvents)
       const consentEntries = await Promise.all(currentBalances.map(async (customer) => {
         try {
           const response = await fetch(API_BASE + '/customers/' + encodeURIComponent(customer.customer) + '/reminder-consent')
@@ -123,6 +131,50 @@ function App() {
       setRefreshing(false)
     }
   }, [])
+
+  const selectCustomer = useCallback(async (name) => {
+    setSelectedCustomer(name)
+    try {
+      const response = await fetch(API_BASE + '/customers/' + encodeURIComponent(name) + '/history')
+      if (response.ok) {
+        const data = await response.json()
+        setCustomerHistoryData(data)
+      }
+    } catch {
+      // Local fallback calculation in activeCustomerHistory handles this seamlessly
+    }
+  }, [])
+
+  const activeCustomerHistory = useMemo(() => {
+    if (!selectedCustomer) return null
+    if (customerHistoryData && customerHistoryData.customer && customerHistoryData.customer.toLowerCase() === selectedCustomer.toLowerCase()) {
+      return customerHistoryData
+    }
+    const custRow = balances.find((b) => b.customer.toLowerCase() === selectedCustomer.toLowerCase())
+    const netDue = custRow ? custRow.net_due : 0
+    const custEvents = events.filter((e) => (e.customer_name || '').toLowerCase() === selectedCustomer.toLowerCase())
+    const totalCredit = custEvents.reduce((sum, e) => {
+      const type = e.type === 'correction' ? (e.meta?.replacement_type || 'credit') : e.type
+      return type === 'credit' ? sum + (Number(e.amount) || 0) : sum
+    }, 0)
+    const totalPayment = custEvents.reduce((sum, e) => {
+      const type = e.type === 'correction' ? (e.meta?.replacement_type || 'credit') : e.type
+      return type === 'payment' ? sum + (Number(e.amount) || 0) : sum
+    }, 0)
+    return {
+      customer: selectedCustomer,
+      net_due: netDue,
+      total_credit: totalCredit,
+      total_payment: totalPayment,
+      events: custEvents,
+    }
+  }, [selectedCustomer, customerHistoryData, balances, events])
+
+  const filteredBalances = useMemo(() => {
+    if (!customerSearch.trim()) return balances
+    const q = customerSearch.trim().toLowerCase()
+    return balances.filter((b) => b.customer.toLowerCase().includes(q))
+  }, [balances, customerSearch])
 
   useEffect(() => {
     if (!backendOnline && API_BASE && API_BASE.includes('render.com')) {
@@ -420,7 +472,7 @@ function App() {
       <main id="top" className="page-content">
         <section className="welcome-row">
           <div><p className="eyebrow">YOUR DIGITAL BAHI KHATA</p><h1>Good business starts<br className="desktop-break" /> with a clear hisaab.</h1><p className="welcome-copy">Speak naturally. Every udhaar and payment stays organized.</p></div>
-          <div className="today-chip"><span>✳</span>{new Date().toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}</div>
+          <div className="today-chip">{new Date().toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}</div>
         </section>
 
         <section className="summary-grid" aria-label="Ledger overview">
@@ -462,11 +514,281 @@ function App() {
           </div>
 
           <div className="ledger-panel panel">
-            <div className="panel-heading ledger-heading"><div><p className="eyebrow">CUSTOMER LEDGER</p><h2>Who owes you</h2></div><div className="ledger-actions"><button className="export-button" onClick={downloadExcel}>Download Excel</button><button className="export-button" onClick={openInExcel}>Open in Excel</button><button className="text-button" onClick={refreshLedger} disabled={refreshing}>{refreshing ? 'Updating…' : 'Refresh'} <Icon name="refresh" size={15} /></button></div></div>
-            {balances.length ? <div className="customer-list"><div className="customer-row customer-row-heading"><span>Name</span><span>Balance status</span><span>Total amount</span></div>{balances.map((customer) => <article className="customer-row" key={(customer.customer_id || '') + '-' + customer.customer}><div className="customer-info"><strong>{customer.customer}</strong><label className="reminder-consent"><input type="checkbox" checked={Boolean(reminderConsents[customer.customer])} onChange={(event) => updateReminderConsent(customer.customer, event.target.checked)} /> Customer opted in to reminders</label>{reminderConsents[customer.customer] && <button type="button" className="reminder-preview-button" onClick={() => previewReminder(customer.customer)}>Preview polite reminder</button>}</div><div className={'customer-status ' + (customer.net_due < 0 ? 'credit-balance' : '')}>{customer.net_due < 0 ? 'You owe' : 'Owes you'}</div><div className={'customer-balance ' + (customer.net_due < 0 ? 'credit-balance' : '')}><strong>{money(Math.abs(customer.net_due))}</strong></div></article>)}</div> : <div className="empty-ledger"><div className="empty-icon"><Icon name="book" size={23} /></div><strong>Your ledger is ready</strong><p>New customer balances will show up here after your first entry.</p></div>}
-            {reminderPreview && <aside className="reminder-preview"><strong>Polite reminder preview · {reminderPreview.customer_name}</strong><p>{reminderPreview.message}</p><small>Preview only. No message was sent.</small><button type="button" onClick={() => setReminderPreview(null)}>Close</button></aside>}
-            <div className="recent-heading"><div><p className="eyebrow">RECENT ACTIVITY</p><h3>Latest entries</h3></div><span className="recent-count">{events.length} entries</span></div>
-            {events.length ? <div className="activity-list">{events.slice(0, 5).map((entry) => <div className="activity-row" key={entry.event_id}><span className={'activity-mark ' + (entry.type === 'payment' ? 'payment-mark' : '')}><Icon name={entry.type === 'payment' ? 'check' : entry.type === 'correction' ? 'refresh' : 'plus'} size={14} /></span><div className="activity-main"><strong>{entry.customer_name || entry.type}</strong><span>{entry.type === 'payment' ? 'Payment received' : entry.type === 'credit' ? 'Udhaar added' : entry.type === 'correction' ? 'Entry corrected' : entry.type} · {shortDate(entry.date)}</span></div><strong className={'activity-amount ' + (entry.type === 'payment' ? 'payment-amount' : '')}>{entry.type === 'payment' ? '−' : entry.type === 'correction' ? '↻ ' : '+'}{money(entry.amount)}</strong></div>)}</div> : <p className="no-activity">Your recent entries will appear here.</p>}
+            <div className="panel-heading ledger-heading">
+              <div>
+                <p className="eyebrow">CUSTOMER LEDGER</p>
+                <h2>{selectedCustomer ? `${selectedCustomer}'s Hisaab` : 'Who owes you'}</h2>
+              </div>
+              <div className="ledger-actions">
+                <button className="export-button" onClick={downloadExcel}>Download Excel</button>
+                <button className="export-button" onClick={openInExcel}>Open in Excel</button>
+                <button className="text-button" onClick={refreshLedger} disabled={refreshing}>
+                  {refreshing ? 'Updating…' : 'Refresh'} <Icon name="refresh" size={15} />
+                </button>
+              </div>
+            </div>
+
+            {selectedCustomer && activeCustomerHistory ? (
+              <div className="customer-detail-view">
+                <div className="customer-detail-top">
+                  <button 
+                    type="button" 
+                    className="back-customers-button" 
+                    onClick={() => { setSelectedCustomer(null); setCustomerHistoryData(null); }}
+                  >
+                    <Icon name="back" size={14} /> Back to all customers
+                  </button>
+                  <span className={'customer-detail-badge ' + (activeCustomerHistory.net_due < 0 ? 'credit-balance' : '')}>
+                    {activeCustomerHistory.net_due > 0 ? 'Owes you' : activeCustomerHistory.net_due < 0 ? 'You owe' : 'Settled'}
+                  </span>
+                </div>
+
+                <div className="customer-profile-card">
+                  <div className="customer-profile-header">
+                    <div className="customer-profile-avatar">
+                      {selectedCustomer.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="customer-profile-name">
+                      <h3>{selectedCustomer}</h3>
+                      <p>Customer Statement & Ledger</p>
+                    </div>
+                    <div className="customer-profile-due">
+                      <span className="due-label">Current Balance</span>
+                      <strong className={activeCustomerHistory.net_due < 0 ? 'credit-balance' : ''}>
+                        {money(Math.abs(activeCustomerHistory.net_due))}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="customer-stats-grid">
+                    <div className="cust-stat-box">
+                      <span>Total Udhaar Given</span>
+                      <strong className="stat-credit">{money(activeCustomerHistory.total_credit || 0)}</strong>
+                    </div>
+                    <div className="cust-stat-box">
+                      <span>Total Paid / Wapas</span>
+                      <strong className="stat-payment">{money(activeCustomerHistory.total_payment || 0)}</strong>
+                    </div>
+                    <div className="cust-stat-box">
+                      <span>Total Entries</span>
+                      <strong>{activeCustomerHistory.events.length}</strong>
+                    </div>
+                  </div>
+
+                  <div className="customer-profile-actions">
+                    <label className="reminder-consent">
+                      <input 
+                        type="checkbox" 
+                        checked={Boolean(reminderConsents[selectedCustomer])} 
+                        onChange={(event) => updateReminderConsent(selectedCustomer, event.target.checked)} 
+                      /> 
+                      Opted in to payment reminders
+                    </label>
+                    {reminderConsents[selectedCustomer] && (
+                      <button 
+                        type="button" 
+                        className="reminder-preview-button" 
+                        onClick={() => previewReminder(selectedCustomer)}
+                      >
+                        Preview polite reminder
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {reminderPreview && (
+                  <aside className="reminder-preview" style={{ marginTop: '12px' }}>
+                    <strong>Polite reminder preview · {reminderPreview.customer_name}</strong>
+                    <p>{reminderPreview.message}</p>
+                    <small>Preview only. No message was sent.</small>
+                    <button type="button" onClick={() => setReminderPreview(null)}>Close</button>
+                  </aside>
+                )}
+
+                <div className="customer-history-section">
+                  <div className="section-title-row">
+                    <h4>All History & Entries</h4>
+                    <span>{activeCustomerHistory.events.length} entries</span>
+                  </div>
+
+                  {activeCustomerHistory.events.length ? (
+                    <div className="customer-timeline">
+                      {activeCustomerHistory.events.map((ev) => {
+                        const isPayment = ev.type === 'payment'
+                        const isCorrection = ev.type === 'correction'
+                        return (
+                          <div key={ev.event_id || Math.random()} className="timeline-item">
+                            <div className={'timeline-icon ' + (isPayment ? 'icon-pay' : isCorrection ? 'icon-corr' : 'icon-cred')}>
+                              <Icon name={isPayment ? 'check' : isCorrection ? 'refresh' : 'plus'} size={14} />
+                            </div>
+                            <div className="timeline-info">
+                              <div className="timeline-title-row">
+                                <strong>{isPayment ? 'Payment received / Wapas' : isCorrection ? 'Entry corrected' : 'Udhaar added'}</strong>
+                                <span className={'timeline-amt ' + (isPayment ? 'amt-pay' : 'amt-cred')}>
+                                  {isPayment ? '− ' : '+ '}{money(ev.amount)}
+                                </span>
+                              </div>
+                              <div className="timeline-meta">
+                                <span>{shortDate(ev.date) || 'Recent'}</span>
+                                {ev.meta?.source && <span className="timeline-tag">{ev.meta.source}</span>}
+                                {ev.meta?.previous_amount && <span className="timeline-tag">Prev: {money(ev.meta.previous_amount)}</span>}
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <div className="empty-history">
+                      <p>No transactions recorded yet for {selectedCustomer}.</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="customer-search-row">
+                  <Icon name="search" size={15} />
+                  <input
+                    type="text"
+                    className="customer-search-input"
+                    placeholder="Search customer by name..."
+                    value={customerSearch}
+                    onChange={(e) => setCustomerSearch(e.target.value)}
+                  />
+                  {customerSearch && (
+                    <button type="button" onClick={() => setCustomerSearch('')} className="customer-search-clear">
+                      <Icon name="close" size={13} />
+                    </button>
+                  )}
+                </div>
+
+                {balances.length > 0 && (
+                  <div className="customer-tabs-row">
+                    <span className="customer-tabs-label">Filter:</span>
+                    <button 
+                      type="button" 
+                      className={'customer-tab-chip ' + (!customerSearch ? 'active' : '')}
+                      onClick={() => setCustomerSearch('')}
+                    >
+                      All ({balances.length})
+                    </button>
+                    {balances.slice(0, 10).map((c) => (
+                      <button
+                        key={'tab-' + c.customer}
+                        type="button"
+                        className="customer-tab-chip"
+                        onClick={() => selectCustomer(c.customer)}
+                        title={`Click to view ${c.customer}'s hisaab`}
+                      >
+                        {c.customer} ({money(Math.abs(c.net_due))})
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {filteredBalances.length ? (
+                  <div className="customer-list">
+                    <div className="customer-row customer-row-heading">
+                      <span>Name (Click to view history)</span>
+                      <span>Balance status</span>
+                      <span>Total amount</span>
+                    </div>
+                    {filteredBalances.map((customer) => (
+                      <article 
+                        className="customer-row clickable-customer-row" 
+                        key={(customer.customer_id || '') + '-' + customer.customer}
+                        onClick={() => selectCustomer(customer.customer)}
+                        title={`Click to view ${customer.customer}'s complete history and balance`}
+                      >
+                        <div className="customer-info">
+                          <div className="customer-name-link">
+                            <strong>{customer.customer}</strong>
+                            <span className="view-history-pill">View History →</span>
+                          </div>
+                          <label className="reminder-consent" onClick={(e) => e.stopPropagation()}>
+                            <input 
+                              type="checkbox" 
+                              checked={Boolean(reminderConsents[customer.customer])} 
+                              onChange={(event) => updateReminderConsent(customer.customer, event.target.checked)} 
+                            /> 
+                            Opted in to reminders
+                          </label>
+                          {reminderConsents[customer.customer] && (
+                            <button 
+                              type="button" 
+                              className="reminder-preview-button" 
+                              onClick={(e) => { e.stopPropagation(); previewReminder(customer.customer); }}
+                            >
+                              Preview reminder
+                            </button>
+                          )}
+                        </div>
+                        <div className={'customer-status ' + (customer.net_due < 0 ? 'credit-balance' : '')}>
+                          {customer.net_due < 0 ? 'You owe' : 'Owes you'}
+                        </div>
+                        <div className={'customer-balance ' + (customer.net_due < 0 ? 'credit-balance' : '')}>
+                          <strong>{money(Math.abs(customer.net_due))}</strong>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                ) : balances.length ? (
+                  <div className="empty-history" style={{ marginTop: '14px' }}>
+                    <p>No customer found matching “{customerSearch}”.</p>
+                  </div>
+                ) : (
+                  <div className="empty-ledger">
+                    <div className="empty-icon"><Icon name="book" size={23} /></div>
+                    <strong>Your ledger is ready</strong>
+                    <p>New customer balances will show up here after your first entry.</p>
+                  </div>
+                )}
+
+                {reminderPreview && (
+                  <aside className="reminder-preview">
+                    <strong>Polite reminder preview · {reminderPreview.customer_name}</strong>
+                    <p>{reminderPreview.message}</p>
+                    <small>Preview only. No message was sent.</small>
+                    <button type="button" onClick={() => setReminderPreview(null)}>Close</button>
+                  </aside>
+                )}
+
+                <div className="recent-heading">
+                  <div>
+                    <p className="eyebrow">RECENT ACTIVITY</p>
+                    <h3>Latest entries</h3>
+                  </div>
+                  <span className="recent-count">{events.length} entries</span>
+                </div>
+                {events.length ? (
+                  <div className="activity-list">
+                    {events.slice(0, 5).map((entry) => (
+                      <div 
+                        className="activity-row" 
+                        key={entry.event_id} 
+                        onClick={() => entry.customer_name && selectCustomer(entry.customer_name)}
+                        style={{ cursor: entry.customer_name ? 'pointer' : 'default' }}
+                        title={entry.customer_name ? `Click to see ${entry.customer_name}'s history` : ''}
+                      >
+                        <span className={'activity-mark ' + (entry.type === 'payment' ? 'payment-mark' : '')}>
+                          <Icon name={entry.type === 'payment' ? 'check' : entry.type === 'correction' ? 'refresh' : 'plus'} size={14} />
+                        </span>
+                        <div className="activity-main">
+                          <strong>{entry.customer_name || entry.type}</strong>
+                          <span>{entry.type === 'payment' ? 'Payment received' : entry.type === 'credit' ? 'Udhaar added' : entry.type === 'correction' ? 'Entry corrected' : entry.type} · {shortDate(entry.date)}</span>
+                        </div>
+                        <strong className={'activity-amount ' + (entry.type === 'payment' ? 'payment-amount' : '')}>
+                          {entry.type === 'payment' ? '−' : entry.type === 'correction' ? '↻ ' : '+'}{money(entry.amount)}
+                        </strong>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="no-activity">Your recent entries will appear here.</p>
+                )}
+              </>
+            )}
           </div>
         </section>
         <footer className="page-footer"><span>VOICE KHATA</span><span>Simple hisaab. Peace of mind.</span></footer>

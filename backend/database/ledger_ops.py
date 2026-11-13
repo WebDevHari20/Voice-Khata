@@ -262,6 +262,44 @@ def get_events(limit=100):
     return result
 
 
+def get_customer_history(customer_name: str):
+    canonical, choices = resolve_customer_name(customer_name)
+    target = canonical or _canonical_customer_name(customer_name.strip())
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM events ORDER BY rowid DESC").fetchall()
+    
+    events = []
+    total_credit = 0.0
+    total_payment = 0.0
+    for r in rows:
+        c_name = _canonical_customer_name(r["customer_name"])
+        if c_name and c_name.casefold() == target.casefold():
+            ev = dict(r)
+            ev["customer_name"] = c_name
+            try:
+                ev["meta"] = json.loads(ev["meta"] or "{}")
+            except Exception:
+                ev["meta"] = {}
+            events.append(ev)
+            k = ev["type"]
+            if k == "correction":
+                k = ev["meta"].get("replacement_type", "credit")
+            amt = float(ev.get("amount") or 0)
+            if k == "credit":
+                total_credit += amt
+            elif k == "payment":
+                total_payment += amt
+
+    net_due = get_customer_net_due(target)
+    return {
+        "customer": target,
+        "net_due": round(net_due, 2),
+        "total_credit": round(total_credit, 2),
+        "total_payment": round(total_payment, 2),
+        "events": events
+    }
+
+
 def get_all_events():
     with _connect() as conn:
         rows = conn.execute("SELECT * FROM events ORDER BY rowid DESC").fetchall()

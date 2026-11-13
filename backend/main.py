@@ -24,7 +24,7 @@ try:
         apply_ledger_event, get_customer_balance, get_ledger_summary,
         get_all_events, get_daily_credit_total, get_reminder_consent, initialize_database,
         prepare_latest_correction, prepare_reminder, resolve_customer_name,
-        set_reminder_consent, get_last_active_customer, get_customer_net_due,
+        set_reminder_consent, get_last_active_customer, get_customer_net_due, get_customer_history,
     )
     from .nlu.gemini_parser import extract_customer_name, parse_transcript, DEFAULT_GEMINI_KEY
     from .nlu.normalizer import normalize_hindi_numbers
@@ -36,7 +36,7 @@ except (ImportError, ValueError):
         apply_ledger_event, get_customer_balance, get_ledger_summary,
         get_all_events, get_daily_credit_total, get_reminder_consent, initialize_database,
         prepare_latest_correction, prepare_reminder, resolve_customer_name,
-        set_reminder_consent, get_last_active_customer, get_customer_net_due,
+        set_reminder_consent, get_last_active_customer, get_customer_net_due, get_customer_history,
     )
     from nlu.gemini_parser import extract_customer_name, parse_transcript, DEFAULT_GEMINI_KEY
     from nlu.normalizer import normalize_hindi_numbers
@@ -189,6 +189,11 @@ def ledger_export_excel():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@app.get("/customers/{customer_name}/history")
+def customer_history(customer_name: str):
+    return get_customer_history(customer_name)
 
 
 @app.get("/customers/{customer_name}/reminder-consent")
