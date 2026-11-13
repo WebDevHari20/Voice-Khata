@@ -29,6 +29,7 @@ async def _connect_prisma(key, sample_rate, language_code):
         additional_headers={
             "x-api-key-id": key,
             "language_code": language_code,
+            "x-model": "prisma-v3.0",
             "model": "prisma-v3.0",
             "format": "transliterate",
             "x-sample-rate": str(sample_rate),

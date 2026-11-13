@@ -279,12 +279,12 @@ function App() {
         if (!speakAnswer(data.text)) setError('Speech playback is unavailable in this browser.')
       } else if (data.type === 'provider_unavailable') {
         setUseBrowserSpeech(true)
-        if (data.detail && (data.detail.includes('401') || data.detail.includes('GNANI_API_KEY'))) {
-          setReply('Prisma STT unavailable (HTTP 401). Using browser voice recognition.')
-        }
+        setError('')
+        setReply('Prisma key expired/unauthorized. Switched to browser voice recognition.')
       } else if (data.type === 'provider_error' || data.type === 'error') {
-        if (data.detail && data.detail.includes('401')) {
+        if (data.detail && (data.detail.includes('401') || data.detail.includes('Prisma') || data.detail.includes('WebSocket'))) {
           setUseBrowserSpeech(true)
+          setError('')
           setReply('Prisma key unauthorized (HTTP 401). Switched to browser voice recognition.')
         } else {
           setError(data.detail || data.message || 'Speech service returned an error.')
@@ -571,7 +571,22 @@ function App() {
             )}
             {(transcript || reply || pendingEvent) && <div className="conversation-card" aria-live="polite">{transcript && <div className="conversation-line"><span className="conversation-label">YOU SAID</span><p>“{transcript}”</p></div>}{reply && <div className="conversation-line reply-line"><span className="conversation-label"><Icon name="check" size={13} /> KHATA</span><p>{reply}</p></div>}{pendingEvent && <div className="confirmation-actions"><div className="confirmation-summary"><strong>{pendingEvent.customer_name}</strong><span>{pendingEvent.type === 'payment' ? 'payment' : pendingEvent.type === 'correction' ? 'corrected balance' : 'udhaar'} · {money(pendingEvent.amount)}</span></div><div className="confirmation-buttons"><button type="button" className="confirm-button" onClick={() => confirmPending('haan')}>Confirm entry</button><button type="button" className="decline-button" onClick={() => confirmPending('nahi')}>No, cancel</button></div><small>Or say “nahi, 430” to correct the amount.</small></div>}</div>}
             <form className="type-entry" onSubmit={submitTyped}><label htmlFor="typed-entry">Or type a phrase</label><div className="type-entry-row"><input id="typed-entry" value={typedText} onChange={(event) => setTypedText(event.target.value)} placeholder="e.g. Sita ko 500 udhaar" /><button type="submit" className="send-button" disabled={!typedText.trim()} aria-label="Send phrase"><Icon name="arrow" size={18} /></button></div></form>
-            {error && <div className="error-message" role="alert"><Icon name="alert" size={16} />{error}</div>}
+            {error && (
+              <div className="error-message" role="alert" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
+                  <Icon name="alert" size={16} />
+                  <span>{error}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setError('')}
+                  style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: '1.1rem', padding: '0 4px', lineHeight: 1 }}
+                  aria-label="Dismiss error"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
             <div className="privacy-note"><span>●</span>Your ledger stays on this device.</div>
           </div>
 
