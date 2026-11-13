@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: voice-khata-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: GNANI_PRISMA_URL
+        value: wss://api.vachana.ai/stt/v3/stream
+      - key: GNANI_TIMBRE_URL
+        value: https://api.vachana.ai/api/v1/tts/inference
+      - key: GNANI_API_KEY
+        sync: false

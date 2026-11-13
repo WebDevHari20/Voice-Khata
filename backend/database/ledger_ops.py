@@ -7,9 +7,19 @@ from pathlib import Path
 
 
 DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "ledger.db"
-DB_PATH = Path(os.getenv("DATABASE_PATH", str(DEFAULT_DB)))
-if not DB_PATH.is_absolute():
-    DB_PATH = (Path(__file__).resolve().parents[2] / DB_PATH).resolve()
+db_env = os.getenv("DATABASE_PATH")
+if db_env:
+    cand = Path(db_env)
+    if cand.is_absolute():
+        DB_PATH = cand
+    elif (Path.cwd() / cand).parent.exists():
+        DB_PATH = (Path.cwd() / cand).resolve()
+    elif (Path(__file__).resolve().parent.parent / cand).parent.exists():
+        DB_PATH = (Path(__file__).resolve().parent.parent / cand).resolve()
+    else:
+        DB_PATH = (Path(__file__).resolve().parents[2] / cand).resolve()
+else:
+    DB_PATH = DEFAULT_DB
 EVENT_TYPES = {"credit", "payment", "correction", "query", "undo"}
 NAME_FILLERS = {"abhi", "just", "usne", "kiye", "kiya", "rupiya", "rupaye", "rupees", "lota", "lauta", "lautaya", "lautaye", "wapas", "returned", "return"}
 

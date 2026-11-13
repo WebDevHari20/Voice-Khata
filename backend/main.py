@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 import re
+import sys
 from datetime import date
 from dotenv import load_dotenv
 
@@ -10,17 +11,34 @@ from fastapi.responses import Response
 
 load_dotenv(Path(__file__).with_name(".env"))
 
-from .core.stt_stream import stream_audio_to_stt
-from .core.tts_engine import stream_tts, synthesize_audio
-from .core.excel_export import build_workbook
-from .database.ledger_ops import (
-    apply_ledger_event, get_customer_balance, get_ledger_summary,
-    get_all_events, get_daily_credit_total, get_reminder_consent, initialize_database,
-    prepare_latest_correction, prepare_reminder, resolve_customer_name,
-    set_reminder_consent,
-)
-from .nlu.gemini_parser import extract_customer_name, parse_transcript
-from .nlu.normalizer import normalize_hindi_numbers
+backend_dir = Path(__file__).resolve().parent
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+
+try:
+    from .core.stt_stream import stream_audio_to_stt
+    from .core.tts_engine import stream_tts, synthesize_audio
+    from .core.excel_export import build_workbook
+    from .database.ledger_ops import (
+        apply_ledger_event, get_customer_balance, get_ledger_summary,
+        get_all_events, get_daily_credit_total, get_reminder_consent, initialize_database,
+        prepare_latest_correction, prepare_reminder, resolve_customer_name,
+        set_reminder_consent,
+    )
+    from .nlu.gemini_parser import extract_customer_name, parse_transcript
+    from .nlu.normalizer import normalize_hindi_numbers
+except (ImportError, ValueError):
+    from core.stt_stream import stream_audio_to_stt
+    from core.tts_engine import stream_tts, synthesize_audio
+    from core.excel_export import build_workbook
+    from database.ledger_ops import (
+        apply_ledger_event, get_customer_balance, get_ledger_summary,
+        get_all_events, get_daily_credit_total, get_reminder_consent, initialize_database,
+        prepare_latest_correction, prepare_reminder, resolve_customer_name,
+        set_reminder_consent,
+    )
+    from nlu.gemini_parser import extract_customer_name, parse_transcript
+    from nlu.normalizer import normalize_hindi_numbers
 
 
 YES_WORDS = {"haan", "han", "ha", "yes", "yep", "correct", "sahi", "theek", "thik", "bilkul", "confirm", "save", "kar", "karo", "ji", "jee", "hai"}
@@ -70,7 +88,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -122,7 +140,10 @@ async def tts(payload: dict):
 
 @app.get("/ledger/events")
 def ledger_events(limit: int = 100):
-    from .database.ledger_ops import get_events
+    try:
+        from .database.ledger_ops import get_events
+    except (ImportError, ValueError):
+        from database.ledger_ops import get_events
     return get_events(limit)
 
 

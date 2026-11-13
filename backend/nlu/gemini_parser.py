@@ -1,7 +1,11 @@
 import re
 from datetime import date
-from .normalizer import normalize_hindi_numbers
-from .dates import resolve_relative_date
+try:
+    from .normalizer import normalize_hindi_numbers
+    from .dates import resolve_relative_date
+except (ImportError, ValueError):
+    from normalizer import normalize_hindi_numbers
+    from dates import resolve_relative_date
 
 def extract_customer_name(transcript: str):
     if not isinstance(transcript, str) or not transcript.strip():

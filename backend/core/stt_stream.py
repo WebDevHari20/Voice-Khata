@@ -17,7 +17,10 @@ def _api_key():
 
 async def _connect_prisma(key, sample_rate, language_code):
     from websockets.asyncio.client import connect
-    from ..database.ledger_ops import get_ledger_summary
+    try:
+        from ..database.ledger_ops import get_ledger_summary
+    except (ImportError, ValueError):
+        from database.ledger_ops import get_ledger_summary
 
     customer_names = [row["customer"] for row in get_ledger_summary()][:200]
 
@@ -73,8 +76,15 @@ async def stream_audio_to_stt(websocket):
                             try:
                                 provider = await _connect_prisma(key, sample_rate, language_code)
                                 provider_read = asyncio.create_task(provider.recv())
+                                await websocket.send_json({"type": "stt_status", "provider": "prisma", "status": "connected"})
                             except Exception as exc:
-                                await websocket.send_json({"type": "provider_error", "detail": f"Prisma connection failed: {exc}"})
+                                provider = provider_read = None
+                                await websocket.send_json({
+                                    "type": "provider_unavailable",
+                                    "detail": f"Prisma connection failed: {exc}",
+                                    "provider": "prisma",
+                                    "hint": "Check GNANI_API_KEY. Browser speech recognition is active as fallback.",
+                                })
                     else:
                         await websocket.send_json({"type": "error", "detail": "send transcript text, a configure frame, or raw PCM audio"})
                 elif message.get("bytes") is not None:
@@ -90,7 +100,12 @@ async def stream_audio_to_stt(websocket):
                             provider = await _connect_prisma(key, sample_rate, language_code)
                             provider_read = asyncio.create_task(provider.recv())
                         except Exception as exc:
-                            await websocket.send_json({"type": "provider_error", "detail": f"Prisma connection failed: {exc}"})
+                            await websocket.send_json({
+                                "type": "provider_unavailable",
+                                "detail": f"Prisma connection failed: {exc}",
+                                "provider": "prisma",
+                                "hint": "Falling back to browser speech recognition or typed phrase.",
+                            })
                             continue
                     try:
                         await provider.send(frame)
