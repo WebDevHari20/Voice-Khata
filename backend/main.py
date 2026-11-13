@@ -26,7 +26,7 @@ try:
         prepare_latest_correction, prepare_reminder, resolve_customer_name,
         set_reminder_consent, get_last_active_customer, get_customer_net_due,
     )
-    from .nlu.gemini_parser import extract_customer_name, parse_transcript
+    from .nlu.gemini_parser import extract_customer_name, parse_transcript, DEFAULT_GEMINI_KEY
     from .nlu.normalizer import normalize_hindi_numbers
 except (ImportError, ValueError):
     from core.stt_stream import stream_audio_to_stt
@@ -38,7 +38,7 @@ except (ImportError, ValueError):
         prepare_latest_correction, prepare_reminder, resolve_customer_name,
         set_reminder_consent, get_last_active_customer, get_customer_net_due,
     )
-    from nlu.gemini_parser import extract_customer_name, parse_transcript
+    from nlu.gemini_parser import extract_customer_name, parse_transcript, DEFAULT_GEMINI_KEY
     from nlu.normalizer import normalize_hindi_numbers
 
 
@@ -117,11 +117,13 @@ app.add_middleware(
 @app.get("/health")
 def health():
     key = os.getenv("GNANI_API_KEY") or os.getenv("GNANI_PRISMA_KEY") or ""
+    gemini_key = os.getenv("GEMINI_API_KEY") or DEFAULT_GEMINI_KEY
     return {
         "status": "ok",
         "has_env_key": bool(key),
         "env_key_prefix": key[:8] if key else "",
         "env_key_len": len(key) if key else 0,
+        "has_gemini_key": bool(gemini_key),
     }
 
 
@@ -426,6 +428,40 @@ async def websocket_endpoint(websocket: WebSocket):
                 prompt = events[0].get("clarification", "Kripya naam aur rakam dobara batayein.") if events else "Kripya dobara bole."
                 await stream_tts(websocket, prompt)
                 await websocket.send_json({"type": "clarification", "text": prompt})
+                continue
+            if events[0].get("is_full_settlement"):
+                summary = get_ledger_summary()
+                balances = {row["customer"].casefold(): row["net_due"] for row in summary}
+                target_customer = events[0].get("customer_name")
+                if not target_customer or events[0].get("is_pronoun"):
+                    target_customer = get_last_active_customer()
+                if not target_customer:
+                    reply = "Kis customer ka poora hisaab clear karna hai? Naam boliye. / किस ग्राहक का पूरा हिसाब क्लियर करना है? नाम बताइए।"
+                    await stream_tts(websocket, reply)
+                    await websocket.send_json({"type": "clarification", "text": reply})
+                    continue
+                total_due = balances.get(target_customer.casefold(), 0.0)
+                if total_due <= 0:
+                    reply = f"{target_customer} ka koi baki udhaar nahi hai. / {target_customer} का कोई बाकी उधार नहीं है।"
+                    await stream_tts(websocket, reply)
+                    await websocket.send_json({"type": "clarification", "text": reply})
+                    continue
+                pending_event = {
+                    "type": "bulk_payment",
+                    "customer_name": target_customer,
+                    "amount": round(total_due, 2),
+                    "events": [{
+                        "type": "payment",
+                        "customer_name": target_customer,
+                        "amount": round(total_due, 2),
+                        "date": date.today().isoformat(),
+                        "confidence": 0.95,
+                        "meta": {"source": "spoken_full_settlement"}
+                    }]
+                }
+                prompt = _confirmation_prompt(pending_event)
+                await stream_tts(websocket, prompt)
+                await websocket.send_json({"type": "confirmation_required", "event": pending_event, "text": prompt})
                 continue
             if events[0]["type"] == "query":
                 if events[0].get("metric") == "daily_credit":
