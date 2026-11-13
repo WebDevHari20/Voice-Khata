@@ -1,16 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
-const rawApi = (import.meta.env.VITE_API_BASE || '').trim().replace(/\/+$/, '')
+let rawApi = (import.meta.env.VITE_API_BASE || '').trim().replace(/\/+$/, '')
 const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:'
+if (isHttps && rawApi.startsWith('http://')) {
+  rawApi = rawApi.replace(/^http:\/\//, 'https://')
+}
 const API_BASE = rawApi || (isHttps ? '' : 'http://127.0.0.1:8000')
 const WS_BASE = API_BASE
   ? API_BASE.replace(/^http(s?):/, 'ws$1:')
-  : (isHttps ? (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host : 'ws://127.0.0.1:8000')
-
-const BrowserSpeechRecognition = typeof window !== 'undefined'
-  ? (window.SpeechRecognition || window.webkitSpeechRecognition)
-  : null
+  : (isHttps ? 'wss://' + (typeof window !== 'undefined' ? window.location.host : '') : 'ws://127.0.0.1:8000')
 
 function Icon({ name, size = 20 }) {
   const props = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }
@@ -80,19 +79,10 @@ function App() {
   const [typedText, setTypedText] = useState('')
   const [error, setError] = useState('')
   const [refreshing, setRefreshing] = useState(false)
-  const [useBrowserSpeech, setUseBrowserSpeech] = useState(Boolean(BrowserSpeechRecognition))
 
   const socketRef = useRef(null)
   const captureRef = useRef(null)
   const bufferRef = useRef([])
-  const recognitionRef = useRef(null)
-  const handsFreeRef = useRef(handsFree)
-  const recordingRef = useRef(recording)
-  const useBrowserSpeechRef = useRef(useBrowserSpeech)
-
-  useEffect(() => { handsFreeRef.current = handsFree }, [handsFree])
-  useEffect(() => { recordingRef.current = recording }, [recording])
-  useEffect(() => { useBrowserSpeechRef.current = useBrowserSpeech }, [useBrowserSpeech])
 
   const refreshLedger = useCallback(async () => {
     if (!API_BASE) {
@@ -106,7 +96,7 @@ function App() {
         fetch(API_BASE + '/ledger/summary'),
         fetch(API_BASE + '/ledger/events?limit=12'),
       ])
-      if (!results[0].ok || !results[1].ok) throw new Error('Ledger could not be loaded')
+      if (!results[0].ok || !results[1].ok) throw new Error('Ledger could not be loaded from backend (' + API_BASE + ')')
       const currentBalances = await results[0].json()
       setBalances(currentBalances)
       setEvents(await results[1].json())
@@ -195,26 +185,6 @@ function App() {
     window.location.href = 'ms-excel:ofe|u|' + workbookUrl
   }, [])
 
-  const stopListening = useCallback(async () => {
-    if (recognitionRef.current) {
-      try { recognitionRef.current.stop() } catch {}
-      recognitionRef.current = null
-    }
-    const capture = captureRef.current
-    if (capture) {
-      capture.processor.onaudioprocess = null
-      capture.processor.disconnect()
-      capture.source.disconnect()
-      capture.mute.disconnect()
-      capture.stream.getTracks().forEach((track) => track.stop())
-      await capture.context.close().catch(() => {})
-      captureRef.current = null
-    }
-    setHandsFree(false)
-    setRecording(false)
-    setSocketStatus('connected')
-  }, [])
-
   const openSocket = useCallback(() => new Promise((resolve, reject) => {
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       resolve(socketRef.current)
@@ -240,7 +210,19 @@ function App() {
         setTranscript(data.text || '')
         setReply('')
       } else if (data.type === 'control' && data.action === 'stop_listening') {
-        stopListening()
+        const capture = captureRef.current
+        if (capture) {
+          capture.processor.onaudioprocess = null
+          capture.processor.disconnect()
+          capture.source.disconnect()
+          capture.mute.disconnect()
+          capture.stream.getTracks().forEach((track) => track.stop())
+          capture.context.close().catch(() => {})
+          captureRef.current = null
+        }
+        setHandsFree(false)
+        setRecording(false)
+        setSocketStatus('connected')
         setReply('Listening stopped.')
       } else if (data.type === 'clarification') {
         setReply(data.text || 'Please say that again.')
@@ -277,18 +259,8 @@ function App() {
       } else if (data.type === 'tts_text') {
         setReply(data.text || '')
         if (!speakAnswer(data.text)) setError('Speech playback is unavailable in this browser.')
-      } else if (data.type === 'provider_unavailable') {
-        setUseBrowserSpeech(true)
-        setError('')
-        setReply('Prisma key expired/unauthorized. Switched to browser voice recognition.')
-      } else if (data.type === 'provider_error' || data.type === 'error') {
-        if (data.detail && (data.detail.includes('401') || data.detail.includes('Prisma') || data.detail.includes('WebSocket'))) {
-          setUseBrowserSpeech(true)
-          setError('')
-          setReply('Prisma key unauthorized (HTTP 401). Switched to browser voice recognition.')
-        } else {
-          setError(data.detail || data.message || 'Speech service returned an error.')
-        }
+      } else if (['provider_unavailable', 'provider_error', 'error'].includes(data.type)) {
+        setError(data.detail || data.message || 'Speech service returned an error.')
       }
     }
     socket.onerror = () => {
@@ -299,110 +271,21 @@ function App() {
       setSocketStatus('disconnected')
       if (socketRef.current === socket) socketRef.current = null
     }
-  }), [refreshLedger, stopListening])
-
-  const sendTranscript = useCallback(async (text, confidence = 0.95) => {
-    if (!text || !text.trim()) return
-    const phrase = text.trim()
-    setSocketStatus('processing')
-    try {
-      const socket = await openSocket().catch(() => null)
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ transcript: phrase, confidence }))
-      } else {
-        const response = await fetch(API_BASE + '/ledger/apply', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ transcript: phrase }),
-        })
-        const result = await response.json()
-        if (result.clarification) {
-          setReply(result.clarification)
-          speakAnswer(result.clarification)
-        } else if (result.response_string) {
-          setReply(result.response_string)
-          speakAnswer(result.response_string)
-          refreshLedger()
-        }
-        setSocketStatus('connected')
-      }
-    } catch (cause) {
-      setError(cause.message || 'Failed to submit voice transcript.')
-      setSocketStatus('connected')
-    }
-  }, [openSocket, refreshLedger])
+  }), [refreshLedger])
 
   const startRecording = useCallback(async () => {
     setError('')
     setTranscript('')
     setReply('')
 
-    if (useBrowserSpeechRef.current && BrowserSpeechRecognition) {
-      try {
-        const recognition = new BrowserSpeechRecognition()
-        recognition.lang = 'hi-IN'
-        recognition.continuous = Boolean(handsFreeRef.current)
-        recognition.interimResults = true
-
-        recognition.onstart = () => {
-          setRecording(true)
-          setSocketStatus('listening')
-        }
-
-        recognition.onresult = (event) => {
-          let text = ''
-          for (let i = 0; i < event.results.length; i += 1) {
-            text += event.results[i][0].transcript + ' '
-          }
-          const current = text.trim()
-          setTranscript(current)
-          const last = event.results[event.results.length - 1]
-          if (last.isFinal && last[0].transcript.trim()) {
-            const finalPhrase = last[0].transcript.trim()
-            const low = finalPhrase.toLowerCase().replace(/[.!?]/g, '').trim()
-            if (['stop', 'stop listening', 'band karo', 'mic band', 'bas'].includes(low)) {
-              stopListening()
-              setReply('Listening stopped.')
-              return
-            }
-            sendTranscript(finalPhrase, last[0].confidence || 0.95)
-          }
-        }
-
-        recognition.onerror = (e) => {
-          if (e.error !== 'no-speech') {
-            setError('Browser speech note: ' + e.error)
-          }
-          setRecording(false)
-        }
-
-        recognition.onend = () => {
-          if (!handsFreeRef.current) {
-            setRecording(false)
-            setSocketStatus('connected')
-          }
-        }
-
-        recognition.start()
-        recognitionRef.current = recognition
-        return true
-      } catch (err) {
-        setError(err.message || 'Could not start browser speech recognition.')
-        setRecording(false)
-        return false
-      }
-    }
-
     try {
       const socket = await openSocket()
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        if (BrowserSpeechRecognition) {
-          setUseBrowserSpeech(true)
-          return
-        }
         throw new Error('Microphone access is unavailable in this browser.')
       }
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      })
       const context = new AudioContext()
       const source = context.createMediaStreamSource(stream)
       const processor = context.createScriptProcessor(1024, 1, 1)
@@ -425,22 +308,13 @@ function App() {
       setSocketStatus('listening')
       return true
     } catch (cause) {
-      if (BrowserSpeechRecognition) {
-        setUseBrowserSpeech(true)
-        setReply('Switched to browser speech recognition.')
-        return false
-      }
       setError(cause.message || 'Could not start microphone.')
       setRecording(false)
       return false
     }
-  }, [openSocket, sendTranscript, stopListening])
+  }, [openSocket])
 
   const stopRecording = useCallback(async () => {
-    if (recognitionRef.current) {
-      try { recognitionRef.current.stop() } catch {}
-      recognitionRef.current = null
-    }
     const capture = captureRef.current
     if (capture) {
       capture.processor.onaudioprocess = null
@@ -488,23 +362,31 @@ function App() {
 
   const confirmPending = useCallback(async (answer) => {
     try {
-      await sendTranscript(answer, 0.95)
+      const socket = await openSocket()
+      socket.send(JSON.stringify({ transcript: answer, confidence: 0.95 }))
+      setSocketStatus('processing')
       setError('')
     } catch (cause) {
       setError(cause.message || 'Could not confirm this entry.')
     }
-  }, [sendTranscript])
+  }, [openSocket])
 
   const submitTyped = useCallback(async (event) => {
     event.preventDefault()
     const text = typedText.trim()
     if (!text) return
-    setTypedText('')
-    setReply('')
-    setError('')
-    setTranscript(text)
-    await sendTranscript(text, 0.95)
-  }, [sendTranscript, typedText])
+    try {
+      const socket = await openSocket()
+      socket.send(JSON.stringify({ transcript: text, confidence: 0.95 }))
+      setTranscript(text)
+      setTypedText('')
+      setReply('')
+      setSocketStatus('processing')
+      setError('')
+    } catch (cause) {
+      setError(cause.message || 'Could not send that entry.')
+    }
+  }, [openSocket, typedText])
 
   useEffect(() => {
     const initialLoad = window.setTimeout(() => refreshLedger(), 0)
@@ -557,18 +439,6 @@ function App() {
             </button>
             {handsFree && <div className="handsfree-help">Say “stop listening” when you’re done.</div>}
             <div className="voice-hint">Try <b>“Ramesh ko 340 udhaar”</b> or <b>“Ramesh ka total?”</b></div>
-            {BrowserSpeechRecognition && (
-              <div style={{ fontSize: '0.75rem', opacity: 0.8, marginTop: '6px', textAlign: 'center' }}>
-                Voice engine: <b>{useBrowserSpeech ? 'Browser Speech (Hindi/Hinglish)' : 'Prisma Cloud STT'}</b> ·{' '}
-                <button
-                  type="button"
-                  onClick={() => { setUseBrowserSpeech(!useBrowserSpeech); setError(''); }}
-                  style={{ background: 'none', border: 'none', color: '#16a34a', cursor: 'pointer', textDecoration: 'underline', padding: 0, font: 'inherit' }}
-                >
-                  {useBrowserSpeech ? 'Use Prisma STT' : 'Switch to Browser Speech'}
-                </button>
-              </div>
-            )}
             {(transcript || reply || pendingEvent) && <div className="conversation-card" aria-live="polite">{transcript && <div className="conversation-line"><span className="conversation-label">YOU SAID</span><p>“{transcript}”</p></div>}{reply && <div className="conversation-line reply-line"><span className="conversation-label"><Icon name="check" size={13} /> KHATA</span><p>{reply}</p></div>}{pendingEvent && <div className="confirmation-actions"><div className="confirmation-summary"><strong>{pendingEvent.customer_name}</strong><span>{pendingEvent.type === 'payment' ? 'payment' : pendingEvent.type === 'correction' ? 'corrected balance' : 'udhaar'} · {money(pendingEvent.amount)}</span></div><div className="confirmation-buttons"><button type="button" className="confirm-button" onClick={() => confirmPending('haan')}>Confirm entry</button><button type="button" className="decline-button" onClick={() => confirmPending('nahi')}>No, cancel</button></div><small>Or say “nahi, 430” to correct the amount.</small></div>}</div>}
             <form className="type-entry" onSubmit={submitTyped}><label htmlFor="typed-entry">Or type a phrase</label><div className="type-entry-row"><input id="typed-entry" value={typedText} onChange={(event) => setTypedText(event.target.value)} placeholder="e.g. Sita ko 500 udhaar" /><button type="submit" className="send-button" disabled={!typedText.trim()} aria-label="Send phrase"><Icon name="arrow" size={18} /></button></div></form>
             {error && (

@@ -17,27 +17,18 @@ def _api_key():
 
 async def _connect_prisma(key, sample_rate, language_code):
     from websockets.asyncio.client import connect
-    try:
-        from ..database.ledger_ops import get_ledger_summary
-    except (ImportError, ValueError):
-        from database.ledger_ops import get_ledger_summary
 
-    customer_names = [row["customer"] for row in get_ledger_summary()][:200]
+    headers = {
+        "X-API-Key-ID": key,
+        "language_code": language_code or "hi-IN",
+    }
+    model = os.getenv("GNANI_PRISMA_MODEL", "prisma-v3.0")
+    if model:
+        headers["model"] = model
 
     return await connect(
         STT_URL,
-        additional_headers={
-            "x-api-key-id": key,
-            "language_code": language_code,
-            "x-model": "prisma-v3.0",
-            "model": "prisma-v3.0",
-            "format": "transliterate",
-            "x-sample-rate": str(sample_rate),
-            "topic": "Kirana shop ledger: customer names, udhaar, payments, rupee amounts, and dates.",
-            "keyterms": json.dumps(customer_names, ensure_ascii=False),
-            "x-min-speech-ms": "180",
-            "x-min-silence-ms": "500",
-        },
+        additional_headers=headers,
         open_timeout=15,
         max_size=None,
     )
@@ -91,10 +82,9 @@ async def stream_audio_to_stt(websocket):
                             provider_read = asyncio.create_task(provider.recv())
                         except Exception as exc:
                             await websocket.send_json({
-                                "type": "provider_unavailable",
+                                "type": "provider_error",
                                 "detail": f"Prisma connection failed: {exc}",
                                 "provider": "prisma",
-                                "hint": "Falling back to browser speech recognition or typed phrase.",
                             })
                             continue
                     try:
