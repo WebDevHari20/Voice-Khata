@@ -95,7 +95,13 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    key = os.getenv("GNANI_API_KEY") or os.getenv("GNANI_PRISMA_KEY") or ""
+    return {
+        "status": "ok",
+        "has_env_key": bool(key),
+        "env_key_prefix": key[:8] if key else "",
+        "env_key_len": len(key) if key else 0,
+    }
 
 
 @app.post("/parse")

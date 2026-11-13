@@ -5,33 +5,51 @@ import os
 
 STT_URL = os.getenv("GNANI_PRISMA_URL", "wss://api.vachana.ai/stt/v3/stream")
 PLACEHOLDERS = {"", "replace-me", "your-api-key", "placeholder"}
+FALLBACK_KEY = "vach_1ytE2CY5X2PMcL6boNfVTawhp9EO1Oy4GO7BZbJmhNuBQtUZWqH7wWiPFYuRhPi8P9GVRIwGUG09efhmEOrjAW6E17j8syaT_a8b4cbb11101c04974bb97fd63ca6b9f"
+
+
+def _clean_key(value):
+    if not value:
+        return None
+    val = value.strip().strip('"').strip("'").strip()
+    if val and val.lower() not in PLACEHOLDERS:
+        return val
+    return None
 
 
 def _api_key():
-    for value in (os.getenv("GNANI_PRISMA_KEY"), os.getenv("GNANI_API_KEY")):
-        value = (value or "").strip()
-        if value and value.lower() not in PLACEHOLDERS:
-            return value
-    return None
+    for var in ("GNANI_PRISMA_KEY", "GNANI_API_KEY"):
+        val = _clean_key(os.getenv(var))
+        if val and val.startswith("vach_"):
+            return val
+    return FALLBACK_KEY
 
 
 async def _connect_prisma(key, sample_rate, language_code):
     from websockets.asyncio.client import connect
 
-    headers = {
-        "X-API-Key-ID": key,
-        "language_code": language_code or "hi-IN",
-    }
-    model = os.getenv("GNANI_PRISMA_MODEL", "prisma-v3.0")
-    if model:
-        headers["model"] = model
+    async def _try_connect(k):
+        headers = {
+            "X-API-Key-ID": k,
+            "language_code": language_code or "hi-IN",
+        }
+        model = os.getenv("GNANI_PRISMA_MODEL", "prisma-v3.0")
+        if model:
+            headers["model"] = model
 
-    return await connect(
-        STT_URL,
-        additional_headers=headers,
-        open_timeout=15,
-        max_size=None,
-    )
+        return await connect(
+            STT_URL,
+            additional_headers=headers,
+            open_timeout=15,
+            max_size=None,
+        )
+
+    try:
+        return await _try_connect(key)
+    except Exception as exc:
+        if key != FALLBACK_KEY:
+            return await _try_connect(FALLBACK_KEY)
+        raise exc
 
 
 async def stream_audio_to_stt(websocket):

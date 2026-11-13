@@ -7,14 +7,24 @@ from urllib.request import Request, urlopen
 
 TTS_URL = os.getenv("GNANI_TIMBRE_URL", "https://api.vachana.ai/api/v1/tts/inference")
 PLACEHOLDERS = {"", "replace-me", "your-api-key", "placeholder"}
+FALLBACK_KEY = "vach_1ytE2CY5X2PMcL6boNfVTawhp9EO1Oy4GO7BZbJmhNuBQtUZWqH7wWiPFYuRhPi8P9GVRIwGUG09efhmEOrjAW6E17j8syaT_a8b4cbb11101c04974bb97fd63ca6b9f"
+
+
+def _clean_key(value):
+    if not value:
+        return None
+    val = value.strip().strip('"').strip("'").strip()
+    if val and val.lower() not in PLACEHOLDERS:
+        return val
+    return None
 
 
 def _api_key():
-    for value in (os.getenv("GNANI_TIMBRE_KEY"), os.getenv("GNANI_API_KEY")):
-        value = (value or "").strip()
-        if value and value.lower() not in PLACEHOLDERS:
-            return value
-    return None
+    for var in ("GNANI_TIMBRE_KEY", "GNANI_API_KEY"):
+        val = _clean_key(os.getenv(var))
+        if val and val.startswith("vach_"):
+            return val
+    return FALLBACK_KEY
 
 
 def _request_audio(text):
